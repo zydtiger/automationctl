@@ -29,7 +29,7 @@ from .commands import CommandRunner
 from .config import Automations, load_prompt
 from .errors import AutomationctlError, ConfigError, LockBusy
 from .locks import named_lock
-from .notify import HttpSender, NotifyEvent, NotifyOutcome, dispatch
+from .notify import HttpSender, NotifyEvent, NotifyOutcome, dispatch, transport_name
 from .records import (
     STATUS_ERROR,
     STATUS_FAILED,
@@ -377,16 +377,31 @@ def _finalize(
                 body="\n".join(body_parts),
                 run_dir=str(run_dir),
             )
-            outcomes = tuple(
-                dispatch(
-                    references,
-                    automations.manifest,
-                    event,
-                    env=_notify_env(automations, task, options, run_dir),
-                    runner=options.notify_runner,
-                    sender=options.notify_sender,
+            try:
+                outcomes = tuple(
+                    dispatch(
+                        references,
+                        automations.manifest,
+                        event,
+                        env=_notify_env(automations, task, options, run_dir),
+                        runner=options.notify_runner,
+                        sender=options.notify_sender,
+                    )
                 )
-            )
+            except Exception as exc:
+                # The invariant, not a substitute for the precise handling
+                # inside send(): no notification transport may ever destroy a
+                # run's exit code or its record. Transports reach arbitrary
+                # third-party code — HTTP stacks, hook programs — and the set
+                # of exceptions that can come back is not enumerable.
+                outcomes = tuple(
+                    NotifyOutcome(
+                        transport_name(reference) or reference,
+                        False,
+                        f"transport raised {type(exc).__name__}: {exc}",
+                    )
+                    for reference in references
+                )
             meta["notifications"] = [
                 {"transport": item.transport, "ok": item.ok, "detail": item.detail}
                 for item in outcomes

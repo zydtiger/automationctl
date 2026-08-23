@@ -91,7 +91,8 @@ def send(
             return NotifyOutcome(
                 transport.name, False, f"environment variable {transport.url_env} is not set"
             )
-        if not url.startswith(("http://", "https://")):
+        # Schemes are case-insensitive; "HTTP://host" is a valid URL.
+        if not url.lower().startswith(("http://", "https://")):
             return NotifyOutcome(
                 transport.name, False, f"{transport.url_env} is not an http(s) URL: {url!r}"
             )
@@ -100,10 +101,11 @@ def send(
         try:
             deliver(url, event.body.encode("utf-8"), {"Title": title})
         except (OSError, urllib.error.URLError, ValueError) as exc:
-            # ValueError is in the list deliberately: urllib raises a bare one
-            # for a URL it cannot classify. A notification must never be able
-            # to kill the wrapper after the run records are already written and
-            # take the child's exit code with it.
+            # These three get precise wording because they are the expected
+            # failures — unreachable host, refused connection, unclassifiable
+            # URL. They are not the safety net: an HTTP stack can raise things
+            # no caller can enumerate, so the wrapper guards the whole dispatch
+            # (see wrapper._finalize) and this list only sharpens the message.
             return NotifyOutcome(transport.name, False, f"post failed: {exc}")
         return NotifyOutcome(transport.name, True, "posted")
 

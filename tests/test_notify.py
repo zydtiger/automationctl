@@ -70,6 +70,16 @@ def test_ntfy_rejects_a_url_that_is_not_http(url: str) -> None:
     assert "not an http(s) URL" in outcome.detail
 
 
+@pytest.mark.parametrize("url", ["HTTPS://example/topic", "Http://example/topic"])
+def test_ntfy_accepts_an_uppercase_scheme(url: str) -> None:
+    """URL schemes are case-insensitive; the guard must not reject a valid one."""
+    recorder = Recorder()
+    transport = NotifyTransport(name="ntfy", kind="ntfy", url_env="NTFY_URL")
+    outcome = send(transport, EVENT, env={"NTFY_URL": url}, sender=recorder)
+    assert outcome.ok
+    assert recorder.calls[0][0] == url
+
+
 def test_ntfy_survives_a_sender_that_raises_value_error() -> None:
     """urllib raises a bare ValueError for URLs it cannot classify."""
 

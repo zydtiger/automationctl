@@ -156,6 +156,60 @@ def test_notify_still_fires_when_a_task_env_file_is_unreadable(tree: Tree, tmp_p
     assert posted == ["https://ntfy.example/alerts"]
 
 
+def write_ntfy_tree(tree: Tree, tmp_path: Path, url: str) -> None:
+    """An ntfy transport whose URL arrives the way a real one does: an env file."""
+    secrets = tmp_path / "agent-env"
+    secrets.write_text(f"NTFY_URL={url}\n", encoding="utf-8")
+    tree.write_manifest(
+        "schema_version = 1\n\n"
+        "[hosts.testhost]\n"
+        'tasks = ["hello"]\n'
+        f'env_files = ["{secrets}"]\n\n'
+        "[notify.ntfy]\n"
+        'url_env = "NTFY_URL"\n'
+    )
+
+
+def test_an_arbitrary_transport_exception_cannot_take_down_the_wrapper(
+    tree: Tree, tmp_path: Path
+) -> None:
+    """The invariant: no transport failure may ever cost the child's exit code."""
+
+    class WeirdTransportError(Exception):
+        """Something no caller could enumerate — an HTTP stack's own quirk."""
+
+    def explode(url: str, body: bytes, headers: Mapping[str, str]) -> None:
+        raise WeirdTransportError("bad status line")
+
+    write_ntfy_tree(tree, tmp_path, "https://ntfy.example/alerts")
+    tree.write_task(
+        "hello",
+        'description = "d"\ncommand = ["/bin/sh", "-c", "exit 7"]\non_failure = ["notify:ntfy"]\n',
+    )
+    result, _ = run_one(tree, tmp_path, notify_sender=explode)
+
+    assert result.status == records.STATUS_FAILED
+    assert result.exit_code == 7
+    assert [outcome.ok for outcome in result.notifications] == [False]
+    assert result.notifications[0].transport == "ntfy"
+    meta = records.read_meta(result.run_dir)
+    assert meta is not None
+    assert "WeirdTransportError" in meta["notifications"][0]["detail"]
+
+
+def test_an_uppercase_scheme_is_a_valid_notify_url(tree: Tree, tmp_path: Path) -> None:
+    """URL schemes are case-insensitive; the guard must not reject one."""
+    write_ntfy_tree(tree, tmp_path, "HTTPS://ntfy.example/alerts")
+    tree.write_task(
+        "hello",
+        'description = "d"\ncommand = ["/bin/false"]\non_failure = ["notify:ntfy"]\n',
+    )
+    posted: list[str] = []
+    result, _ = run_one(tree, tmp_path, notify_sender=lambda url, body, headers: posted.append(url))
+    assert [outcome.ok for outcome in result.notifications] == [True]
+    assert posted == ["HTTPS://ntfy.example/alerts"]
+
+
 def test_a_malformed_notify_url_cannot_take_down_the_wrapper(tree: Tree, tmp_path: Path) -> None:
     """A bad env-file value is a failed notification, not a lost exit code."""
     secrets = tmp_path / "agent-env"
