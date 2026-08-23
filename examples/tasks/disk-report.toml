@@ -1,0 +1,11 @@
+# An interval schedule with an inline environment variable and no
+# notification: a report that is worth recording but not worth waking anyone.
+
+description = "Record filesystem usage every six hours"
+
+command = ["df", "-h"]
+
+schedule = "every 6h"
+timeout = "2m"
+on_failure = []
+env = { LC_ALL = "C" }

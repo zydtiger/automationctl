@@ -1,0 +1,9 @@
+# A plain shell task. `command` is verbatim argv and is always the ground
+# truth; no shell is involved, so quoting surprises cannot happen.
+
+description = "Mirror the notes directory into local backups"
+
+command = ["rsync", "-a", "--delete", "~/notes/", "~/backups/notes/"]
+
+schedule = "daily 04:30"
+timeout = "10m"

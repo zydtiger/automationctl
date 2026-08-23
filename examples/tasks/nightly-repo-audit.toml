@@ -1,0 +1,15 @@
+# An agent task with a long prompt kept in its own file, a named lock so it
+# never overlaps other agent work, and a summary command that turns the
+# agent's JSON output into result.json.
+
+description = "Nightly audit of open pull requests and stale branches"
+
+runner = "agent-ro"
+prompt_file = "prompts/nightly-repo-audit.md"
+cwd = "~/projects/example"
+
+schedule = "daily 03:00"
+timeout = "45m"
+lock = "agents"
+summary_cmd = ["jq", "-r", ".result"]
+on_failure = ["notify:ntfy"]

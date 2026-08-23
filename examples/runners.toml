@@ -1,0 +1,32 @@
+# Data-only argv expansion tables.
+#
+# automationctl knows nothing about the programs named here. A runner is
+# purely DRY: the same argv, reused by several tasks. `{prompt}` substitutes
+# the task's prompt into argv; `stdin = "prompt"` delivers it on stdin
+# instead. Flag drift lands here as a configuration edit, never as a tool
+# release, so replace `example-agent` with whatever CLI you actually run.
+
+schema_version = 1
+
+[runners.agent-ro]
+description = "Read-only agent invocation; prompt on stdin"
+argv = ["example-agent", "--print", "--output-format", "json", "--mode", "read-only"]
+stdin = "prompt"
+
+[runners.agent-edit]
+description = "Agent invocation allowed to edit files in cwd"
+argv = ["example-agent", "--print", "--output-format", "json", "--mode", "accept-edits"]
+stdin = "prompt"
+
+[runners.agent-argv]
+description = "Agent that takes the prompt as a positional argument"
+argv = ["other-agent", "exec", "--json", "--sandbox", "read-only", "{prompt}"]
+
+# Unattended full access needs a visible, greppable, committed marker.
+# Without `allow_full_access`, lint rejects any task expanding to argv that
+# matches the manifest deny-list.
+[runners.agent-full]
+description = "Unrestricted agent invocation; use deliberately"
+argv = ["example-agent", "--print", "--dangerously-skip-permissions"]
+stdin = "prompt"
+allow_full_access = true

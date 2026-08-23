@@ -1,0 +1,11 @@
+# A plain command task holding a named lock, so it never runs at the same
+# time as anything else that needs the GPU.
+
+description = "Weekly one-epoch training benchmark"
+
+command = ["make", "benchmark"]
+cwd = "~/projects/example-benchmark"
+
+schedule = "weekly sun 05:00"
+timeout = "4h"
+lock = "gpu"

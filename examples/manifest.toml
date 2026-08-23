@@ -1,0 +1,49 @@
+# Example automations manifest.
+#
+# Copy this directory to your own private `automations` repository and edit it.
+# The manifest is the single authority for host selection: task specs never
+# carry a host list.
+
+schema_version = 1
+
+[defaults]
+timeout = "30m"
+on_failure = ["notify:ntfy"]
+randomized_delay = "5m"
+
+[hosts.workstation]
+tasks = [
+  "canary",
+  "nightly-repo-audit",
+  "weekly-benchmark",
+  "mirror-notes",
+  "disk-report",
+]
+path_prepend = ["~/.local/bin"]
+env_files = ["~/.config/agent-env"]
+
+[hosts.laptop]
+tasks = ["canary", "mirror-notes"]
+path_prepend = ["~/.local/bin", "/opt/homebrew/bin"]
+env_files = ["~/.config/agent-env"]
+
+# Notification transports. The tool never stores a URL or a token: `url_env`
+# names the environment variable that holds the full ntfy URL, and that
+# variable comes from a machine-local env file that is never committed.
+[notify.ntfy]
+url_env = "NTFY_URL"
+
+# A generic command transport. Any argv works; the placeholders are filled in
+# by the wrapper.
+[notify.desktop]
+type = "command"
+command = ["notify-send", "{title}", "{body}"]
+
+# The deny-list is configuration, not tool code: this repository decides what
+# "dangerous" means, and `allow_full_access = true` is the committed override.
+[lint]
+forbidden_argv = [
+  "--dangerously-skip-permissions",
+  "--sandbox=danger-full-access",
+  "danger-full-access",
+]

@@ -1,0 +1,11 @@
+# The cheapest possible agent round trip. The most common silent death of an
+# unattended agent system is expired auth or a broken proxy, and a canary
+# catches it before a real task hits it.
+
+description = "Detect broken agent auth or proxy before real tasks hit it"
+
+runner = "agent-ro"
+prompt = "Reply with exactly: ok"
+
+schedule = "daily 08:00"
+timeout = "5m"
