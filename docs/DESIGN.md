@@ -106,10 +106,15 @@ automationctl/
 │   ├── locks.py                 # fcntl named locks
 │   ├── notify.py                # transports: ntfy, command hook
 │   ├── schedule.py              # neutral grammar → per-backend forms
+│   ├── catchup.py               # missed-run decisions from schedule + records
+│   ├── doctor.py                # read-only host probes
+│   ├── commands.py              # the scheduler-command seam (see §11)
+│   ├── paths.py                 # state dir, unit dir, manifest resolution
+│   ├── errors.py                # shared exception types
 │   └── backends/
-│       ├── __init__.py          # interface — solidified in M3, not day one
+│       ├── __init__.py          # interface, reconciliation, backend factory
 │       ├── systemd.py           # render units, systemctl verbs, reconcile
-│       └── launchd.py           # render plists, launchctl verbs (M3)
+│       └── launchd.py           # render plists, launchctl verbs
 ├── tests/                       # golden-file rendering tests, wrapper tests
 └── examples/                    # a complete generic automations layout
 ```
@@ -338,7 +343,6 @@ launchd = [{ Weekday = 1, Hour = 9, Minute = 0 }]
 # ~/.config/systemd/user/automationctl-nightly-repo-audit.service  (GENERATED)
 [Unit]
 Description=automationctl: nightly-repo-audit
-OnFailure=automationctl-notify@%n.service    # backup only; primary notify is in-wrapper
 
 [Service]
 Type=oneshot
@@ -511,11 +515,15 @@ committed marker — reviewable in the `automations` git history.
 
 | Milestone | Delivers | Proves |
 |-----------|----------|--------|
-| M0 | spec/manifest/runners models, template expansion, `lint`, `run` (foreground), run records | the agent-neutral contract works end to end with zero substrate |
-| M1 | full `exec` lifecycle: locks, env building, timeout, tee logging, `summary_cmd`, notify; `status`, `logs`, `doctor` | unattended-grade runtime behavior |
-| M2 | systemd backend: `install --dry-run --diff`, reconcile/GC, timers, `submit`, `pause`/`resume`, `uninstall` | daily-usable on the Linux host |
-| M3 | launchd backend + catch-up agent; backend interface solidified from two real implementations; `prune` | mac parity |
+| M0 ✅ | spec/manifest/runners models, template expansion, `lint`, `run` (foreground), run records | the agent-neutral contract works end to end with zero substrate |
+| M1 ✅ | full `exec` lifecycle: locks, env building, timeout, tee logging, `summary_cmd`, notify; `status`, `logs`, `doctor` | unattended-grade runtime behavior |
+| M2 ✅ | systemd backend: `install --dry-run --diff`, reconcile/GC, timers, `submit`, `pause`/`resume`, `uninstall` | daily-usable on the Linux host |
+| M3 ✅ | launchd backend + catch-up agent; backend interface solidified from two real implementations; `prune` | mac parity |
 | M4 (maybe never) | `watch_path` triggers, socket/webhook activation, pueue backend, cross-host record aggregation | only if a real need appears |
+
+M0–M3 are implemented. The launchd backend is rendered and reconciled by the
+same code path as systemd but has not yet been exercised on a real Mac; its
+control verbs are covered only by recorded-command tests.
 
 Sequencing notes: the backend interface is deliberately *not* abstracted in
 M2 — it is extracted in M3 when the second implementation exists. The private
@@ -533,3 +541,96 @@ publication around M2–M3 after a self-containment audit.
   the file copy is complete).
 - Retention defaults: prune policy shipped as a scheduled task in
   `automations` itself (the system maintaining itself) vs. manual.
+
+---
+
+## 11. Implementation notes
+
+Decisions taken while implementing M0–M3 that refine or depart from the
+sections above. Each stays inside the design's principles — agent-neutral,
+thick wrapper over a dumb substrate, scope-explicit, data not code — and this
+section is the authoritative record of them.
+
+### 11.1 Additional modules
+
+Five modules exist beyond §3.1's tree, each carrying a concern that would
+otherwise be duplicated or would fatten `cli.py`:
+
+- `paths.py` — every filesystem location (state dir, generated-unit dir,
+  manifest, the `automationctl` path embedded in units), each overridable by
+  an environment variable so that tests and dry runs never touch real state.
+- `errors.py` — the shared exception hierarchy, imported by every module.
+- `commands.py` — the seam described in §11.2.
+- `catchup.py` — missed-run decisions; it needs both `schedule` and `records`
+  and belongs to neither.
+- `doctor.py` — read-only host probes, kept out of the command surface.
+
+### 11.2 The scheduler-command seam
+
+Every `systemctl` and `launchctl` invocation goes through a `CommandRunner`
+protocol. Production uses `SubprocessRunner`; tests inject `RecordingRunner`,
+which records argv and returns canned results. This is what makes the install,
+reconcile, pause, and submit paths testable on a machine whose real scheduler
+must not be touched, and it costs one indirection.
+
+### 11.3 No systemd `OnFailure=` hook
+
+§5 showed `OnFailure=automationctl-notify@%n.service` as a Linux-only backup
+for a wrapper that dies before it can notify. Rendering that line without also
+generating the template unit it names would make every failure produce a
+second, spurious failure. In-wrapper notification is primary and covers both
+platforms; the backup hook is deferred until it has a unit to point at.
+
+### 11.4 Jitter on launchd
+
+launchd has no `RandomizedDelaySec`. Where a task configures
+`randomized_delay`, the generated plist starts `automationctl exec --jitter`,
+and the wrapper sleeps a uniform random interval before acquiring the lock.
+systemd timers keep `RandomizedDelaySec` and never pass `--jitter`, so jitter
+is applied exactly once on either platform.
+
+### 11.5 Strict argv, lenient prompts
+
+Placeholder expansion is strict in argv — an unknown `{name}` is an error,
+because a typo there silently changes a command line. It is lenient in prompt
+text, where prose legitimately contains braces: unknown placeholders are left
+verbatim. Prompt text is substituted into argv in the same single pass, so an
+expanded prompt is never rescanned for placeholders.
+
+### 11.6 Process-group termination
+
+Timeout enforcement starts the child in a new session and signals the whole
+process group (SIGTERM, 30s grace, SIGKILL). A bare signal to the direct child
+would leave a `sh -c` wrapper's grandchildren running past the timeout.
+
+### 11.7 CLI option placement and scope
+
+`--manifest`, `--host`, `--backend`, and `--unit-dir` are per-command options
+rather than global ones, which is how typer expresses options that only some
+verbs need. `--backend` and `--unit-dir` also make cross-platform rendering
+reviewable from either host.
+
+`run` and `exec` accept any task in `tasks/`, not only those the current host
+selects — debugging a spec before adding it to a host list is the common case.
+`install` renders only the host's selection, so the manifest remains the sole
+authority over what is scheduled.
+
+`list` reports a task as installed based on the presence of its generated
+files and only then asks the substrate whether it is enabled; it never queries
+the scheduler about a task it has not installed.
+
+### 11.8 Configuration surface added during implementation
+
+- `[notify.<name>]` accepts an explicit `type` (`ntfy` or `command`, otherwise
+  inferred) and an optional `title`. The `command` transport fills `{title}`,
+  `{body}`, `{task}`, `{status}`, `{exit_code}`, and `{run_dir}`.
+- Runners accept an optional `description`.
+- Task specs may carry `schema_version`; it is validated when present.
+- Task names must match `[A-Za-z0-9][A-Za-z0-9._-]*`, since a task name
+  becomes a unit name and a launchd label. `lint` enforces this.
+- `env_files` are parsed as `KEY=value` with `#` comments, optional `export`,
+  and optional surrounding quotes. A missing env file fails the run rather
+  than starting a task without its secrets.
+- Run statuses are `ok`, `failed`, `timeout`, `skipped`, and `error`, where
+  `error` marks a wrapper-level failure (missing binary, missing `cwd`,
+  unreadable env file) that never reached the child process.
