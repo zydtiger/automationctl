@@ -57,6 +57,44 @@ def test_binaries_are_resolved_through_the_env_file_path_override(
     assert details(report, "binary") == [f"only-here -> {tool}"]
 
 
+def test_two_tasks_with_divergent_paths_are_probed_separately(tree: Tree, tmp_path: Path) -> None:
+    """PATH is per task now, so deduping on the program name alone hides a gap."""
+    good_dir = tmp_path / "good" / "bin"
+    good_dir.mkdir(parents=True)
+    tool = good_dir / "shared-tool"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(0o755)
+
+    with_tool = tmp_path / "with-tool.env"
+    with_tool.write_text(f"PATH={good_dir}:/usr/bin:/bin\n", encoding="utf-8")
+    without_tool = tmp_path / "without-tool.env"
+    without_tool.write_text("PATH=/usr/bin:/bin\n", encoding="utf-8")
+
+    tree.write_manifest('schema_version = 1\n\n[hosts.testhost]\ntasks = ["finds", "misses"]\n')
+    tree.write_task(
+        "finds",
+        f'description = "d"\ncommand = ["shared-tool"]\nenv_files = ["{with_tool}"]\n',
+    )
+    tree.write_task(
+        "misses",
+        f'description = "d"\ncommand = ["shared-tool"]\nenv_files = ["{without_tool}"]\n',
+    )
+
+    report = probe(tree, tmp_path)
+    binaries = details(report, "binary")
+    assert len(binaries) == 2
+    assert f"shared-tool -> {tool}" in binaries
+    assert "shared-tool not found or not executable" in binaries
+    assert not report.ok
+
+
+def test_one_program_under_one_path_is_probed_once(tree: Tree, tmp_path: Path) -> None:
+    tree.write_manifest('schema_version = 1\n\n[hosts.testhost]\ntasks = ["a", "b"]\n')
+    for name in ("a", "b"):
+        tree.write_task(name, 'description = "d"\ncommand = ["/bin/echo", "hi"]\n')
+    assert details(probe(tree, tmp_path), "binary") == ["/bin/echo -> /bin/echo"]
+
+
 def test_a_missing_absolute_binary_is_reported(tree: Tree, tmp_path: Path) -> None:
     """An absolute path is not proof of existence."""
     tree.write_task("hello", f'description = "d"\ncommand = ["{tmp_path}/no-such-tool"]\n')

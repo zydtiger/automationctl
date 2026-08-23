@@ -156,6 +156,32 @@ def test_notify_still_fires_when_a_task_env_file_is_unreadable(tree: Tree, tmp_p
     assert posted == ["https://ntfy.example/alerts"]
 
 
+def test_a_malformed_notify_url_cannot_take_down_the_wrapper(tree: Tree, tmp_path: Path) -> None:
+    """A bad env-file value is a failed notification, not a lost exit code."""
+    secrets = tmp_path / "agent-env"
+    secrets.write_text("NTFY_URL=ntfy.example/alerts\n", encoding="utf-8")
+    tree.write_manifest(
+        "schema_version = 1\n\n"
+        "[hosts.testhost]\n"
+        'tasks = ["hello"]\n'
+        f'env_files = ["{secrets}"]\n\n'
+        "[notify.ntfy]\n"
+        'url_env = "NTFY_URL"\n'
+    )
+    tree.write_task(
+        "hello",
+        'description = "d"\ncommand = ["/bin/sh", "-c", "exit 7"]\non_failure = ["notify:ntfy"]\n',
+    )
+    result, _ = run_one(tree, tmp_path)
+
+    assert result.status == records.STATUS_FAILED
+    assert result.exit_code == 7
+    assert [outcome.ok for outcome in result.notifications] == [False]
+    meta = records.read_meta(result.run_dir)
+    assert meta is not None
+    assert "not an http(s) URL" in meta["notifications"][0]["detail"]
+
+
 def test_missing_env_file_fails_the_run(tree: Tree, tmp_path: Path) -> None:
     tree.write_manifest(
         "schema_version = 1\n\n[hosts.testhost]\n"

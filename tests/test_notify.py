@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
+
 from automationctl.commands import CommandResult, RecordingRunner
 from automationctl.notify import NotifyEvent, dispatch, send, transport_name
 from automationctl.spec import Manifest, NotifyTransport
@@ -57,6 +59,27 @@ def test_ntfy_reports_a_missing_environment_variable() -> None:
     outcome = send(transport, EVENT, env={}, sender=Recorder())
     assert not outcome.ok
     assert "NTFY_URL is not set" in outcome.detail
+
+
+@pytest.mark.parametrize("url", ["ntfy.example/alerts", "not a url", "ftp://example/x", "/topic"])
+def test_ntfy_rejects_a_url_that_is_not_http(url: str) -> None:
+    """A typo'd env-file value must be a failed notification, not an exception."""
+    transport = NotifyTransport(name="ntfy", kind="ntfy", url_env="NTFY_URL")
+    outcome = send(transport, EVENT, env={"NTFY_URL": url}, sender=Recorder())
+    assert not outcome.ok
+    assert "not an http(s) URL" in outcome.detail
+
+
+def test_ntfy_survives_a_sender_that_raises_value_error() -> None:
+    """urllib raises a bare ValueError for URLs it cannot classify."""
+
+    def picky(url: str, body: bytes, headers: Mapping[str, str]) -> None:
+        raise ValueError("unknown url type: 'https://'")
+
+    transport = NotifyTransport(name="ntfy", kind="ntfy", url_env="NTFY_URL")
+    outcome = send(transport, EVENT, env={"NTFY_URL": "https://"}, sender=picky)
+    assert not outcome.ok
+    assert "unknown url type" in outcome.detail
 
 
 def test_ntfy_reports_a_transport_failure() -> None:

@@ -91,11 +91,19 @@ def send(
             return NotifyOutcome(
                 transport.name, False, f"environment variable {transport.url_env} is not set"
             )
+        if not url.startswith(("http://", "https://")):
+            return NotifyOutcome(
+                transport.name, False, f"{transport.url_env} is not an http(s) URL: {url!r}"
+            )
         title = transport.title or event.title
         deliver = sender if sender is not None else post
         try:
             deliver(url, event.body.encode("utf-8"), {"Title": title})
-        except (OSError, urllib.error.URLError) as exc:
+        except (OSError, urllib.error.URLError, ValueError) as exc:
+            # ValueError is in the list deliberately: urllib raises a bare one
+            # for a URL it cannot classify. A notification must never be able
+            # to kill the wrapper after the run records are already written and
+            # take the child's exit code with it.
             return NotifyOutcome(transport.name, False, f"post failed: {exc}")
         return NotifyOutcome(transport.name, True, "posted")
 

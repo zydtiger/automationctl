@@ -41,12 +41,28 @@ def _last_started(state_dir: Path, task: str) -> datetime | None:
         return None
 
 
+def _raw_schedule_reason(backend: str | None) -> str:
+    """Explain why a per-backend schedule table is not evaluated here.
+
+    What happens to a missed occurrence then depends entirely on the backend,
+    so the reason says which one is in play rather than implying every
+    platform has a safety net. launchd does not.
+    """
+    opaque = "per-backend schedule table is opaque to catch-up"
+    if backend == "systemd":
+        return f"{opaque}; systemd Persistent= still replays missed runs"
+    if backend == "launchd":
+        return f"{opaque}, and launchd does not replay missed runs itself"
+    return opaque
+
+
 def decide(
     automations: Automations,
     task: TaskSpec,
     *,
     state_dir: Path,
     now: datetime | None = None,
+    backend: str | None = None,
 ) -> CatchupDecision:
     """Decide whether ``task`` should be run now to catch up a missed occurrence."""
     now = now if now is not None else records.utcnow()
@@ -75,12 +91,7 @@ def decide(
         return CatchupDecision(task.name, False, "interval has not elapsed")
 
     if task.schedule.kind == "raw":
-        return CatchupDecision(
-            task.name,
-            False,
-            "per-backend schedule table is opaque to catch-up; "
-            "the backend's own missed-run handling applies",
-        )
+        return CatchupDecision(task.name, False, _raw_schedule_reason(backend))
 
     occurrence = previous_occurrence(task.schedule, now)
     if occurrence is None:
@@ -102,6 +113,7 @@ def plan(
     *,
     state_dir: Path,
     now: datetime | None = None,
+    backend: str | None = None,
 ) -> list[CatchupDecision]:
     """Decide catch-up for every task this host selects.
 
@@ -112,6 +124,6 @@ def plan(
     """
     moment = now if now is not None else records.utcnow()
     return [
-        decide(automations, task, state_dir=state_dir, now=moment)
+        decide(automations, task, state_dir=state_dir, now=moment, backend=backend)
         for task in automations.enabled_tasks()
     ]

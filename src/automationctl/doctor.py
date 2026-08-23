@@ -120,13 +120,15 @@ def run(
         )
     )
 
-    seen: set[str] = set()
+    # Keyed on the search path as well as the name: PATH is per task now, so
+    # the same program can resolve differently — or not at all — for two tasks.
+    seen: set[tuple[str, str]] = set()
     for task in tasks:
         search_path = effective_path(automations, task, env)
         for program in _programs(automations, task):
-            if program in seen:
+            if (program, search_path) in seen:
                 continue
-            seen.add(program)
+            seen.add((program, search_path))
             found = _resolve(program, search_path)
             checks.append(
                 HealthCheck(

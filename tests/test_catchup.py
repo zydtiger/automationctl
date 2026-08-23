@@ -103,6 +103,34 @@ def test_custom_schedule_is_declined_with_an_explicit_reason(tree: Tree) -> None
     assert "opaque to catch-up" in reason
 
 
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [
+        ("systemd", "systemd Persistent= still replays missed runs"),
+        ("launchd", "launchd does not replay missed runs itself"),
+    ],
+)
+def test_custom_schedule_reason_names_the_backend_in_play(
+    tree: Tree, backend: str, expected: str
+) -> None:
+    """Only systemd has a safety net; the reason must not imply launchd has one."""
+    tree.write_task(
+        "hello",
+        'description = "d"\ncommand = ["true"]\n\n'
+        '[schedule]\nsystemd = "Mon..Fri *-*-* 09:00:00"\n'
+        "launchd = [{ Weekday = 1, Hour = 9, Minute = 0 }]\n",
+    )
+    automations = tree.load()
+    result = decide(
+        automations,
+        automations.tasks["hello"],
+        state_dir=tree.state,
+        now=NOW,
+        backend=backend,
+    )
+    assert expected in result.reason
+
+
 def test_custom_schedules_stay_persistent_by_default(tree: Tree) -> None:
     """A raw calendar expression keeps missed-run replay; only catch-up declines."""
     tree.write_task(
