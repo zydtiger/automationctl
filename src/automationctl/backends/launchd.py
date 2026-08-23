@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 import plistlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -64,7 +64,7 @@ class LaunchdBackend(Backend):
         runner: CommandRunner,
         executable: str,
         manifest_path: Path,
-        state_dir: Path | None = None,
+        state_dir: Path,
         uid: int | None = None,
     ) -> None:
         super().__init__(
@@ -152,21 +152,41 @@ class LaunchdBackend(Backend):
     def _label_of(self, filename: str) -> str:
         return filename[: -len(PLIST_SUFFIX)]
 
-    def _load_state(self, label: str) -> bool | None:
+    def _domain_gate(self) -> Callable[[], bool]:
+        """Return a "is the domain reachable?" probe memoized for one verb.
+
+        launchctl reports "could not find service" for a label in a domain it
+        cannot reach as readily as for a label that genuinely is not loaded,
+        so 113 only means "not loaded" if the domain itself answers. The probe
+        is lazy and runs at most once per verb: nothing pays for it unless a
+        113 actually turns up.
+        """
+        answer: list[bool] = []
+
+        def reachable() -> bool:
+            if not answer:
+                answer.append(self._launchctl("print", self.domain).ok)
+            return answer[0]
+
+        return reachable
+
+    def _load_state(self, label: str, domain_ok: Callable[[], bool] | None = None) -> bool | None:
         """Read-only probe: ``True`` loaded, ``False`` not loaded, ``None`` unknown.
 
-        Only launchctl's own "could not find service" code is read as a
-        definite no. Any other failure — launchctl missing, the domain
-        unreachable — is *unknown*, and callers must not mistake it for "there
-        is nothing to stop": that turns a broken substrate into a silent
-        success. The probe's own result is never reported as an operation,
-        since asking a question is not a control command.
+        Only launchctl's own "could not find service" code — and only when the
+        domain is reachable — is read as a definite no. Any other failure, and
+        any 113 from a domain that will not answer, is *unknown*, and callers
+        must not mistake unknown for "there is nothing to stop": that turns a
+        broken substrate into a silent success. The probe's own result is
+        never reported as an operation, since asking a question is not a
+        control command.
         """
         result = self._launchctl("print", self.service_target(label))
         if result.ok:
             return True
         if result.returncode == NOT_FOUND_RETURNCODE:
-            return False
+            gate = domain_ok if domain_ok is not None else self._domain_gate()
+            return False if gate() else None
         return None
 
     def activate(
@@ -174,19 +194,23 @@ class LaunchdBackend(Backend):
         automations: Automations,
         tasks: Sequence[TaskSpec],
         desired: Mapping[str, str] = MappingProxyType({}),
+        rewritten: Collection[str] = (),
     ) -> list[CommandResult]:
         """Re-assert the domain's view of every desired agent.
 
         ``enable`` runs for all of them, because that is what clears a
         ``pause`` and makes "install re-asserts the repository state" true.
-        The disruptive part — bootout followed by bootstrap — runs only for
-        agents whose definition differs from the one launchd last accepted;
-        everything else is left alone, and is bootstrapped only if it is not
-        loaded. An agent whose activation did not land keeps a stale recorded
-        hash, so the next install retries it.
+        The disruptive part — bootout followed by bootstrap — runs for agents
+        whose definition differs from the one launchd last accepted, and for
+        those whose file this reconcile just rewrote. Both signals are needed:
+        the hash catches an activation that never landed, and ``rewritten``
+        catches a plist that drifted on disk and was reloaded behind our back.
+        Everything else is left alone, and is bootstrapped only if it is not
+        loaded.
         """
         results: list[CommandResult] = []
         activated = records.read_activation(self.state_dir, self.name)
+        domain_ok = self._domain_gate()
         labels = [label_for(task.name) for task in tasks] + [CATCHUP_LABEL]
         for label in labels:
             target = self.service_target(label)
@@ -194,11 +218,14 @@ class LaunchdBackend(Backend):
             path = self.unit_dir / filename
             content = desired.get(filename)
             wanted = records.content_hash(content) if content is not None else None
-            stale = wanted is None or activated.get(label) != wanted
+            stale = wanted is None or activated.get(label) != wanted or filename in rewritten
 
             results.append(self._launchctl("enable", target))
-            state = self._load_state(label)
-            if stale and state is not False:
+            state = self._load_state(label, domain_ok)
+            # An unknown state is booted out for the same reason deactivate
+            # does it: a redundant bootout is cheap, and skipping one because
+            # the probe could not answer leaves a stale definition running.
+            if (stale or state is None) and state is not False:
                 results.append(self._launchctl("bootout", target))
                 state = False
             if state is not True:
@@ -221,10 +248,11 @@ class LaunchdBackend(Backend):
         """
         results: list[CommandResult] = []
         activated = records.read_activation(self.state_dir, self.name)
+        domain_ok = self._domain_gate()
         for filename in filenames:
             label = self._label_of(filename)
             activated.pop(label, None)
-            if self._load_state(label) is False:
+            if self._load_state(label, domain_ok) is False:
                 continue
             results.append(self._launchctl("bootout", self.service_target(label)))
         records.write_activation(self.state_dir, self.name, activated)

@@ -474,9 +474,17 @@ def install(
     _render_plan(plan, show_diff=diff)
     if dry_run:
         return
+    # Captured before apply(): once the files are written, this reconcile's
+    # own rewrites become invisible, and a backend that reloads selectively
+    # needs to know a drifted file was just put back.
+    rewritten = {
+        change.path.name
+        for change in plan.changed
+        if change.action in {backends.CREATE, backends.UPDATE}
+    }
     results = list(session.backend.apply(plan, desired))
     results.extend(session.backend.reload())
-    results.extend(session.backend.activate(session.automations, tasks, desired))
+    results.extend(session.backend.activate(session.automations, tasks, desired, rewritten))
     # The failure path speaks first: "installed N task(s)" after a refused
     # scheduler command would be the last line a reader sees, and false.
     _exit_on_substrate_failure(_report_results(results))

@@ -173,6 +173,81 @@ def test_activate_reloads_only_the_agent_whose_definition_changed(
     )
 
 
+def test_activate_reloads_a_plist_this_reconcile_rewrote(
+    rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
+) -> None:
+    """A drifted plist launchd already loaded must be reconverged, not trusted."""
+    backend, automations, files = rendered
+    tasks = automations.enabled_tasks()
+    backend.activate(automations, tasks, files)
+
+    # The file drifted on disk and this reconcile put it back: the content now
+    # matches what we last activated, but launchd is running the edit.
+    filename = "automationctl.calendar-task.plist"
+    second = RecordingRunner()
+    backend.runner = second
+    backend.activate(automations, tasks, files, rewritten={filename})
+
+    booted_out = [line for line in second.transcript if "bootout" in line]
+    assert booted_out == ["launchctl bootout gui/501/automationctl.calendar-task"]
+    assert f"launchctl bootstrap gui/501 {backend.unit_dir}/{filename}" in second.transcript
+
+
+def test_activate_boots_out_when_the_probe_cannot_answer(
+    rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
+) -> None:
+    """Unknown state means reload, exactly as it means bootout in deactivate."""
+    backend, automations, files = rendered
+    tasks = automations.enabled_tasks()
+    backend.activate(automations, tasks, files)  # hashes now match
+
+    label = "automationctl.calendar-task"
+    probe = ("launchctl", "print", f"gui/501/{label}")
+    unknown = RecordingRunner(
+        responses={probe: CommandResult(probe, 5, stderr="Bad file descriptor")}
+    )
+    backend.runner = unknown
+    backend.activate(automations, tasks, files)
+
+    relevant = [line for line in unknown.transcript if label in line and "print" not in line]
+    assert relevant == [
+        f"launchctl enable gui/501/{label}",
+        f"launchctl bootout gui/501/{label}",
+        f"launchctl bootstrap gui/501 {backend.unit_dir}/{label}.plist",
+    ]
+
+
+def test_a_not_found_code_is_unknown_when_the_domain_will_not_answer(
+    rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
+) -> None:
+    """113 means "not loaded" only if the domain itself is reachable."""
+    backend, _, _ = rendered
+    label = "automationctl.calendar-task"
+    domain = ("launchctl", "print", "gui/501")
+    runner = RecordingRunner(
+        responses={
+            **not_loaded(label),
+            domain: CommandResult(domain, 1, stderr="domain unreachable"),
+        }
+    )
+    backend.runner = runner
+    results = backend.deactivate([f"{label}.plist"])
+
+    assert [result.argv for result in results] == [("launchctl", "bootout", f"gui/501/{label}")]
+    assert runner.transcript.count("launchctl print gui/501") == 1
+
+
+def test_the_domain_is_probed_at_most_once_per_verb(
+    rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
+) -> None:
+    backend, _, files = rendered
+    labels = [name[: -len(".plist")] for name in files]
+    runner = RecordingRunner(responses=not_loaded(*labels))
+    backend.runner = runner
+    backend.deactivate(sorted(files))
+    assert runner.transcript.count("launchctl print gui/501") == 1
+
+
 def test_activate_retries_a_label_whose_previous_activation_failed(
     rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
 ) -> None:

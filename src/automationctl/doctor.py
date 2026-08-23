@@ -130,11 +130,15 @@ def run(
                 continue
             seen.add((program, search_path))
             found = _resolve(program, search_path)
+            # Attributed to the task, because two tasks can probe the same
+            # program name against different PATHs and get different answers.
             checks.append(
                 HealthCheck(
                     "binary",
                     found is not None,
-                    f"{program} -> {found}" if found else f"{program} not found or not executable",
+                    f"{task.name}: {program} -> {found}"
+                    if found
+                    else f"{task.name}: {program} not found or not executable",
                 )
             )
         if task.cwd:

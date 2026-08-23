@@ -9,7 +9,7 @@ touched and stale generated units are garbage-collected.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 
@@ -58,7 +58,7 @@ class SystemdBackend(Backend):
         runner: CommandRunner,
         executable: str,
         manifest_path: Path,
-        state_dir: Path | None = None,
+        state_dir: Path,
         uid: int | None = None,
     ) -> None:
         super().__init__(
@@ -146,14 +146,15 @@ class SystemdBackend(Backend):
         automations: Automations,
         tasks: Sequence[TaskSpec],
         desired: Mapping[str, str] = MappingProxyType({}),
+        rewritten: Collection[str] = (),
     ) -> list[CommandResult]:
         """Re-assert every scheduled timer.
 
-        ``desired`` is ignored here, and so is any notion of activation
-        memory: ``enable --now`` is idempotent, never interrupts a running
-        service, and ``daemon-reload`` has already taught systemd the new
-        definitions. Re-asserting the whole selection is both harmless and
-        exactly what ``install`` promises.
+        ``desired`` and ``rewritten`` are ignored here, and so is any notion
+        of activation memory: ``enable --now`` is idempotent, never interrupts
+        a running service, and ``daemon-reload`` has already taught systemd
+        the new definitions. Re-asserting the whole selection is both harmless
+        and exactly what ``install`` promises.
         """
         results: list[CommandResult] = []
         for task in tasks:

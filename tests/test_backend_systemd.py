@@ -80,6 +80,7 @@ def rendered(tree: Tree, tmp_path: Path) -> tuple[SystemdBackend, Automations, d
         runner=RecordingRunner(),
         executable=FIXED_EXECUTABLE,
         manifest_path=FIXED_MANIFEST,
+        state_dir=tree.state,
         uid=1000,
     )
     return backend, automations, backend.desired_files(automations, automations.enabled_tasks())
@@ -218,6 +219,7 @@ def test_enabled_reads_is_enabled_output(tree: Tree, tmp_path: Path) -> None:
         runner=runner,
         executable=FIXED_EXECUTABLE,
         manifest_path=FIXED_MANIFEST,
+        state_dir=tree.state,
     )
     assert backend.enabled(automations.tasks["calendar-task"]) is True
     assert backend.enabled(automations.tasks["manual-task"]) is None

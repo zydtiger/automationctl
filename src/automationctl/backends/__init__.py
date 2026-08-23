@@ -12,7 +12,7 @@ import difflib
 import os
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -92,13 +92,16 @@ class Backend(ABC):
         runner: CommandRunner,
         executable: str,
         manifest_path: Path,
-        state_dir: Path | None = None,
+        state_dir: Path,
     ) -> None:
         self.unit_dir = unit_dir
         self.runner = runner
         self.executable = executable
         self.manifest_path = manifest_path
-        self.state_dir = state_dir if state_dir is not None else paths.state_dir()
+        # Required, never defaulted: a backend that quietly reached for the
+        # real state directory would be the one way a test could write to the
+        # user's own state.
+        self.state_dir = state_dir
 
     # -- rendering ---------------------------------------------------------
 
@@ -187,18 +190,22 @@ class Backend(ABC):
         automations: Automations,
         tasks: Sequence[TaskSpec],
         desired: Mapping[str, str] = MappingProxyType({}),
+        rewritten: Collection[str] = (),
     ) -> list[CommandResult]:
         """Enable and start whatever the given tasks require.
 
-        ``desired`` is the rendered content of every generated file. A backend
-        whose reload is disruptive — launchd must unload an agent before it can
-        load a new definition — compares that content against what it recorded
-        the scheduler last accepting, and reloads only the differences, so an
-        install that changes one task never kills another task's running job.
+        ``desired`` is the rendered content of every generated file, and
+        ``rewritten`` names the files this reconcile just created or updated.
+        A backend whose reload is disruptive — launchd must unload an agent
+        before it can load a new definition — reloads only what those two
+        signals mark, so an install that changes one task never kills another
+        task's running job.
 
-        The comparison is deliberately against recorded *activation*, not
-        against the file diff: a file written by a reconcile whose activation
-        then failed must still count as needing a reload next time.
+        Both signals are needed. Recorded activation catches a file whose
+        activation never landed, which a file diff cannot see because the file
+        was already written. ``rewritten`` catches a file that drifted on disk
+        and was loaded by someone else, which the activation record cannot see
+        because it still matches what we last activated.
         """
 
     @abstractmethod

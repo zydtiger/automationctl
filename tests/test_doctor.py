@@ -18,6 +18,7 @@ def probe(tree: Tree, tmp_path: Path, env: dict[str, str] | None = None) -> doct
         runner=RecordingRunner(),
         executable=FIXED_EXECUTABLE,
         manifest_path=FIXED_MANIFEST,
+        state_dir=tree.state,
         uid=1000,
     )
     return doctor.run(
@@ -54,7 +55,7 @@ def test_binaries_are_resolved_through_the_env_file_path_override(
     tree.write_task("hello", 'description = "d"\ncommand = ["only-here"]\n')
 
     report = probe(tree, tmp_path)
-    assert details(report, "binary") == [f"only-here -> {tool}"]
+    assert details(report, "binary") == [f"hello: only-here -> {tool}"]
 
 
 def test_two_tasks_with_divergent_paths_are_probed_separately(tree: Tree, tmp_path: Path) -> None:
@@ -83,8 +84,8 @@ def test_two_tasks_with_divergent_paths_are_probed_separately(tree: Tree, tmp_pa
     report = probe(tree, tmp_path)
     binaries = details(report, "binary")
     assert len(binaries) == 2
-    assert f"shared-tool -> {tool}" in binaries
-    assert "shared-tool not found or not executable" in binaries
+    assert f"finds: shared-tool -> {tool}" in binaries
+    assert "misses: shared-tool not found or not executable" in binaries
     assert not report.ok
 
 
@@ -92,14 +93,16 @@ def test_one_program_under_one_path_is_probed_once(tree: Tree, tmp_path: Path) -
     tree.write_manifest('schema_version = 1\n\n[hosts.testhost]\ntasks = ["a", "b"]\n')
     for name in ("a", "b"):
         tree.write_task(name, 'description = "d"\ncommand = ["/bin/echo", "hi"]\n')
-    assert details(probe(tree, tmp_path), "binary") == ["/bin/echo -> /bin/echo"]
+    assert details(probe(tree, tmp_path), "binary") == ["a: /bin/echo -> /bin/echo"]
 
 
 def test_a_missing_absolute_binary_is_reported(tree: Tree, tmp_path: Path) -> None:
     """An absolute path is not proof of existence."""
     tree.write_task("hello", f'description = "d"\ncommand = ["{tmp_path}/no-such-tool"]\n')
     report = probe(tree, tmp_path)
-    assert details(report, "binary") == [f"{tmp_path}/no-such-tool not found or not executable"]
+    assert details(report, "binary") == [
+        f"hello: {tmp_path}/no-such-tool not found or not executable"
+    ]
     assert not report.ok
 
 
@@ -109,13 +112,13 @@ def test_a_non_executable_absolute_binary_is_reported(tree: Tree, tmp_path: Path
     target.chmod(0o644)
     tree.write_task("hello", f'description = "d"\ncommand = ["{target}"]\n')
     report = probe(tree, tmp_path)
-    assert details(report, "binary") == [f"{target} not found or not executable"]
+    assert details(report, "binary") == [f"hello: {target} not found or not executable"]
 
 
 def test_an_executable_absolute_binary_passes(tree: Tree, tmp_path: Path) -> None:
     tree.write_task("hello", 'description = "d"\ncommand = ["/bin/echo", "hi"]\n')
     report = probe(tree, tmp_path)
-    assert details(report, "binary") == ["/bin/echo -> /bin/echo"]
+    assert details(report, "binary") == ["hello: /bin/echo -> /bin/echo"]
 
 
 def test_an_undeclared_host_fails_the_report(tree: Tree, tmp_path: Path) -> None:
