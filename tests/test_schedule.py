@@ -1,0 +1,157 @@
+"""The neutral schedule grammar and its lowering to each backend."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import pytest
+
+from automationctl.errors import ScheduleError
+from automationctl.schedule import (
+    format_duration,
+    parse,
+    parse_duration,
+    previous_occurrence,
+    to_launchd,
+    to_systemd,
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "seconds"),
+    [("30s", 30), ("5m", 300), ("4h", 14400), ("1d", 86400), ("1h30m", 5400)],
+)
+def test_parse_duration_accepts_compound_units(text: str, seconds: int) -> None:
+    assert parse_duration(text) == seconds
+
+
+@pytest.mark.parametrize("text", ["", "abc", "5", "5x", "-3m", "m5"])
+def test_parse_duration_rejects_nonsense(text: str) -> None:
+    with pytest.raises(ScheduleError):
+        parse_duration(text)
+
+
+def test_format_duration_is_compact() -> None:
+    assert format_duration(4) == "4s"
+    assert format_duration(90) == "1m 30s"
+    assert format_duration(7800) == "2h 10m"
+
+
+@pytest.mark.parametrize(
+    ("text", "kind", "canonical"),
+    [
+        ("daily 03:00", "daily", "daily 03:00"),
+        ("daily 3:05", "daily", "daily 03:05"),
+        ("weekly sun 05:00", "weekly", "weekly sun 05:00"),
+        ("weekly Monday 09:30", "weekly", "weekly mon 09:30"),
+        ("monthly 1 09:00", "monthly", "monthly 1 09:00"),
+        ("every 15m", "interval", "every 15m"),
+        ("every 6h", "interval", "every 6h"),
+    ],
+)
+def test_grammar_table_parses(text: str, kind: str, canonical: str) -> None:
+    schedule = parse(text)
+    assert schedule.kind == kind
+    assert schedule.text == canonical
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "hourly",
+        "daily",
+        "daily 25:00",
+        "daily 3pm",
+        "weekly funday 05:00",
+        "weekly sun",
+        "monthly 0 09:00",
+        "monthly 32 09:00",
+        "every",
+        "every 15",
+        "every 0m",
+        "every 15d",
+    ],
+)
+def test_grammar_rejects_invalid_forms(text: str) -> None:
+    with pytest.raises(ScheduleError):
+        parse(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("daily 03:00", "*-*-* 03:00:00"),
+        ("weekly sun 05:00", "Sun *-*-* 05:00:00"),
+        ("monthly 1 09:00", "*-*-01 09:00:00"),
+    ],
+)
+def test_systemd_calendar_lowering(text: str, expected: str) -> None:
+    assert to_systemd(parse(text)).on_calendar == (expected,)
+
+
+def test_systemd_interval_lowering_sets_boot_and_active() -> None:
+    timing = to_systemd(parse("every 15m"))
+    assert timing.on_unit_active_sec == "900s"
+    assert timing.on_boot_sec == "900s"
+    assert timing.on_calendar == ()
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("daily 03:00", ({"Hour": 3, "Minute": 0},)),
+        ("weekly sun 05:00", ({"Weekday": 0, "Hour": 5, "Minute": 0},)),
+        ("monthly 1 09:00", ({"Day": 1, "Hour": 9, "Minute": 0},)),
+    ],
+)
+def test_launchd_calendar_lowering(text: str, expected: tuple[dict[str, int], ...]) -> None:
+    assert to_launchd(parse(text)).start_calendar_interval == expected
+
+
+def test_launchd_interval_lowering() -> None:
+    assert to_launchd(parse("every 15m")).start_interval == 900
+
+
+def test_escape_hatch_is_backend_scoped() -> None:
+    schedule = parse({"systemd": "Mon..Fri *-*-* 09..17:00:00"})
+    assert schedule.kind == "raw"
+    assert to_systemd(schedule).on_calendar == ("Mon..Fri *-*-* 09..17:00:00",)
+    with pytest.raises(ScheduleError):
+        to_launchd(schedule)
+
+
+def test_escape_hatch_launchd_list_of_tables() -> None:
+    schedule = parse({"launchd": [{"Weekday": 1, "Hour": 9, "Minute": 0}]})
+    assert to_launchd(schedule).start_calendar_interval == ({"Weekday": 1, "Hour": 9, "Minute": 0},)
+    with pytest.raises(ScheduleError):
+        to_systemd(schedule)
+
+
+def test_escape_hatch_rejects_unknown_backend_key() -> None:
+    with pytest.raises(ScheduleError):
+        parse({"cron": "0 9 * * *"})
+
+
+def moment(text: str) -> datetime:
+    return datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("schedule_text", "now", "expected"),
+    [
+        ("daily 03:00", "2026-08-23 04:00", "2026-08-23 03:00"),
+        ("daily 03:00", "2026-08-23 02:00", "2026-08-22 03:00"),
+        # 2026-08-23 is a Sunday.
+        ("weekly sun 05:00", "2026-08-23 06:00", "2026-08-23 05:00"),
+        ("weekly sun 05:00", "2026-08-23 04:00", "2026-08-16 05:00"),
+        ("monthly 1 09:00", "2026-08-23 10:00", "2026-08-01 09:00"),
+        ("monthly 31 09:00", "2026-03-05 10:00", "2026-01-31 09:00"),
+    ],
+)
+def test_previous_occurrence(schedule_text: str, now: str, expected: str) -> None:
+    assert previous_occurrence(parse(schedule_text), moment(now)) == moment(expected)
+
+
+def test_previous_occurrence_is_undefined_for_intervals() -> None:
+    assert previous_occurrence(parse("every 15m"), moment("2026-08-23 04:00")) is None
