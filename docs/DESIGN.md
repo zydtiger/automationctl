@@ -327,6 +327,9 @@ Neutral grammar limited to what both backends express natively:
 | `monthly 1 09:00` | `OnCalendar=*-*-01 09:00:00` | `{Day 1, Hour 9, Minute 0}` |
 | `every 15m` | `OnUnitActiveSec=15m` (+`OnBootSec`) | `StartInterval 900` |
 
+Times are **local wall clock** on both platforms, matching what `OnCalendar`
+and `StartCalendarInterval` actually do; see §11.9.
+
 Escape hatch for exotic needs, per backend:
 
 ```toml
@@ -475,7 +478,9 @@ code:
    Env construction is wrapper-side so both platforms behave identically and
    units stay free of secrets.
 4. Expand runner template and placeholders into final argv; resolve prompt
-   (inline or file) and wire stdin.
+   (inline or file) and wire stdin. The prompt is written from its own thread,
+   so a prompt larger than the pipe buffer cannot hold the wrapper past its
+   own deadline when the child never reads stdin.
 5. Spawn the child in `cwd`. Enforce `timeout` in-process:
    SIGTERM → 30s grace → SIGKILL.
 6. Tee child stdout/stderr to the run directory *and* to the wrapper's own
@@ -483,11 +488,15 @@ code:
    on Linux for `logs -f`.
 7. On exit, run `summary_cmd` over captured stdout → `result.json`.
 8. Write `meta.json` (argv, timings, exit, `--version` of the invoked binary
-   when cheaply obtainable), update `last/<task>.json`.
+   when cheaply obtainable, and the task fields *after* manifest defaults are
+   applied), update `last/<task>.json`.
 9. On failure or timeout: fire `on_failure` transports with the exit reason,
-   stderr tail, and summary. In-wrapper notify is primary (works on both
-   platforms); the systemd `OnFailure=` hook is a Linux-only backup for the
-   case where the wrapper itself dies.
+   stderr tail, and summary. Transports resolve their variables — an ntfy URL,
+   a webhook token — from the same environment the child was given, because
+   that is where `env_files` put them; a timer's ambient environment has none
+   of it. In-wrapper notify is primary (works on both platforms); the systemd
+   `OnFailure=` hook is a Linux-only backup for the case where the wrapper
+   itself dies.
 10. Exit with the child's code, so the substrate's own status reflects truth.
 
 ---
@@ -583,19 +592,29 @@ platforms; the backup hook is deferred until it has a unit to point at.
 
 ### 11.4 Jitter on launchd
 
-launchd has no `RandomizedDelaySec`. Where a task configures
+launchd has no `RandomizedDelaySec`. Where a **scheduled** task configures
 `randomized_delay`, the generated plist starts `automationctl exec --jitter`,
 and the wrapper sleeps a uniform random interval before acquiring the lock.
 systemd timers keep `RandomizedDelaySec` and never pass `--jitter`, so jitter
 is applied exactly once on either platform.
 
+A task with no schedule never carries `--jitter`. Its agent exists only so
+that `submit` has something to kick, and `submit` means now on both platforms:
+delaying an explicitly requested run by up to the configured jitter would make
+the same verb behave differently on macOS than on Linux.
+
 ### 11.5 Strict argv, lenient prompts
 
-Placeholder expansion is strict in argv — an unknown `{name}` is an error,
-because a typo there silently changes a command line. It is lenient in prompt
-text, where prose legitimately contains braces: unknown placeholders are left
-verbatim. Prompt text is substituted into argv in the same single pass, so an
-expanded prompt is never rescanned for placeholders.
+Placeholder expansion is strict in argv — `{{` and `}}` are escapes for
+literal braces, and an unknown `{name}` is an error, because a typo there
+silently changes a command line.
+
+It is lenient in prompt text. Known placeholders are substituted; every other
+brace is left exactly as written, doubled ones included. A prompt is prose,
+routinely containing JSON, shell brace expansion, or code samples, and this
+tool has no business rewriting an author's braces to deliver an escape
+convention the author never opted into. Prompt text is substituted into argv
+in the same single pass, so an expanded prompt is never rescanned.
 
 ### 11.6 Process-group termination
 
@@ -626,11 +645,100 @@ the scheduler about a task it has not installed.
   `{body}`, `{task}`, `{status}`, `{exit_code}`, and `{run_dir}`.
 - Runners accept an optional `description`.
 - Task specs may carry `schema_version`; it is validated when present.
+- `meta.json` carries the spec snapshot under `spec` and the values that
+  actually governed the run under `effective` (timeout, `on_failure`,
+  randomized delay, persistence). §7 step 1 says "manifest + spec"; recording
+  the resolved values rather than the whole manifest is what lets a record
+  explain a timeout the spec never mentions.
 - Task names must match `[A-Za-z0-9][A-Za-z0-9._-]*`, since a task name
-  becomes a unit name and a launchd label. `lint` enforces this.
+  becomes a unit name, a launchd label, and a run-directory component. The
+  rule is enforced where specs are loaded, not only in `lint`, so no code path
+  can reach the filesystem with a name lint would reject. `catchup` is
+  additionally reserved: automationctl generates an agent of that name.
 - `env_files` are parsed as `KEY=value` with `#` comments, optional `export`,
   and optional surrounding quotes. A missing env file fails the run rather
   than starting a task without its secrets.
 - Run statuses are `ok`, `failed`, `timeout`, `skipped`, and `error`, where
   `error` marks a wrapper-level failure (missing binary, missing `cwd`,
   unreadable env file) that never reached the child process.
+
+### 11.9 Schedules are local wall clock
+
+`OnCalendar` and `StartCalendarInterval` both fire against the machine's local
+time, so `daily 03:00` means 03:00 local on both platforms — not 03:00 UTC.
+Catch-up converts the current instant to local time before applying a
+schedule's wall-clock fields, and compares the resulting instant against the
+run record. Records themselves stay in UTC: an instant is an instant, and only
+the calendar arithmetic is local. Without this, catch-up on any host west or
+east of UTC both fires runs that were not missed and misses runs that were, by
+exactly the UTC offset.
+
+Interval schedules are unaffected — elapsed time has no calendar.
+
+### 11.10 Missed-run replay for escape-hatch schedules
+
+A per-backend `[schedule]` table defaults to `persistent = true`, exactly like
+the neutral calendar forms. Both documented escape forms — a systemd
+`OnCalendar` expression and a launchd `StartCalendarInterval` list — are
+calendar-shaped, and silently dropping `Persistent=` for them would make the
+escape hatch quietly weaker than the grammar it exists to extend. An explicit
+`persistent` in the spec still wins.
+
+The wrapper's own catch-up declines these schedules: their contents are opaque
+to the neutral grammar, so it cannot compute a previous occurrence. It says so
+explicitly rather than reporting "not due" — `status` prints the catch-up
+decision and its reason for every task — and the backend's native missed-run
+handling (systemd's `Persistent=`) still applies.
+
+### 11.11 Reconcile refuses an undeclared host
+
+An undeclared host selects no tasks, so a reconcile computes an empty desired
+state and garbage-collects every managed unit on the machine. `install`
+therefore refuses outright when the manifest has no `[hosts.<name>]` section
+for the target host: no plan is computed and nothing is executed. A typo in
+`--host` must never uninstall an installation, and `doctor` already treats the
+same condition as a failed check.
+
+`uninstall --all` keeps no such guard. It is an explicit request that names
+every file it removes, and it is the right tool for cleaning up a host the
+manifest no longer declares.
+
+### 11.12 The install gate lints this host's selection
+
+Standalone `automationctl lint` scans the whole repository. The gate inside
+`install` scans only the tasks this host selects, plus the manifest-level
+checks that bear on that selection. One repository serves every host (D7), so
+a spec written for another machine — a launchd-only escape hatch, say — must
+not block this machine from installing. The full scan is still one command
+away, and is what a pre-commit hook in the automations repository should run.
+
+### 11.13 A refused scheduler command fails the verb
+
+`install`, `uninstall`, `pause`, `resume`, and `submit` exit non-zero if any
+control command failed, after printing a warning line for each. The files on
+disk still describe the desired state; what failed is the substrate's
+agreement with it, and a green exit code on a host whose timers were never
+enabled is worse than no exit code at all.
+
+### 11.14 launchd reloads only what changed
+
+launchd cannot redefine a loaded agent in place: a changed plist means
+`bootout` then `bootstrap`, which kills whatever that agent is running.
+`install` therefore passes the reconcile plan's created and updated filenames
+to the backend, and only those agents are reloaded. Every desired agent still
+gets `launchctl enable`, which is what clears the persistent disable override
+left by `pause` and makes "install re-asserts the repository state" true on
+macOS; agents that are not loaded at all are bootstrapped. Whether an agent is
+loaded is settled by a read-only `launchctl print` probe, so no operation is
+issued that would predictably fail.
+
+systemd needs none of this: `enable --now` is idempotent and does not
+interrupt a running service, so every scheduled timer is re-asserted on every
+install.
+
+### 11.15 Catch-up runs serially
+
+`catch-up` evaluates every selected task against one instant and then runs the
+due ones one at a time, in the foreground. A machine returning from a week
+offline should not start every missed agent job at once, and tasks sharing a
+named lock would turn most of them into skips anyway.
