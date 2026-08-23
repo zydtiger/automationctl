@@ -182,5 +182,41 @@ def test_a_utc_instant_resolves_against_the_local_calendar(
         assert result.strftime("%Y-%m-%d %H:%M") == expected_local
 
 
+@pytest.mark.parametrize(
+    ("schedule_text", "now_utc", "expected_utc", "note"),
+    [
+        # Europe/Berlin springs forward 2026-03-29 (CET +01:00 → CEST +02:00).
+        # Walking back from a CEST "now" to a CET Saturday must not carry the
+        # +02:00 offset along: 03:00 on 2026-03-28 is 02:00Z, not 01:00Z.
+        ("weekly sat 03:00", "2026-03-31 10:00", "2026-03-28 02:00", "weekly, spring forward"),
+        ("monthly 15 03:00", "2026-04-10 10:00", "2026-03-15 02:00", "monthly, spring forward"),
+        # Europe/Berlin falls back 2026-10-25 (CEST +02:00 → CET +01:00), so
+        # 03:00 on 2026-10-24 is 01:00Z, not 02:00Z.
+        ("weekly sat 03:00", "2026-10-27 11:00", "2026-10-24 01:00", "weekly, fall back"),
+        ("monthly 20 03:00", "2026-11-05 11:00", "2026-10-20 01:00", "monthly, fall back"),
+    ],
+)
+def test_occurrences_resolve_the_offset_of_their_own_date(
+    schedule_text: str, now_utc: str, expected_utc: str, note: str
+) -> None:
+    """Walking back must not carry today's UTC offset across a DST boundary."""
+    with local_tz("Europe/Berlin"):
+        result = previous_occurrence(parse(schedule_text), moment(now_utc))
+        assert result is not None
+        assert result == moment(expected_utc), note
+        # Whatever the offset turns out to be, the wall clock is still 03:00.
+        assert result.strftime("%H:%M") == "03:00"
+
+
+def test_daily_occurrence_on_a_transition_day_keeps_the_wall_clock() -> None:
+    with local_tz("Europe/Berlin"):
+        # 2026-03-29 08:00 CEST is 06:00Z; that day's 03:00 local occurrence
+        # is already CEST, at 01:00Z.
+        result = previous_occurrence(parse("daily 03:00"), moment("2026-03-29 06:00"))
+        assert result is not None
+        assert result == moment("2026-03-29 01:00")
+        assert result.strftime("%H:%M") == "03:00"
+
+
 def test_previous_occurrence_is_undefined_for_intervals() -> None:
     assert previous_occurrence(parse("every 15m"), moment("2026-08-23 04:00")) is None

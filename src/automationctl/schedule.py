@@ -297,24 +297,32 @@ def previous_occurrence(schedule: Schedule, now: datetime) -> datetime | None:
     before the wall-clock fields are applied — and the returned instant is
     timezone-aware, so comparing it against a UTC run record is exact.
 
+    The arithmetic runs on *naive* local wall-clock values, and the zone is
+    re-attached only at the end. An aware datetime carries the concrete UTC
+    offset in force at its own instant, and subtracting days from it keeps
+    that offset frozen; walking back across a daylight-saving boundary that
+    way puts every earlier candidate an hour off the wall clock the scheduler
+    actually fired on. Resolving the offset per candidate date is what keeps
+    "03:00" meaning 03:00 on both sides of a transition.
+
     Interval and escape-hatch schedules return ``None``: the former is handled
     by elapsed-time comparison, the latter is opaque to the neutral grammar.
     """
     if not schedule.is_calendar:
         return None
     assert schedule.hour is not None and schedule.minute is not None
-    local = now.astimezone()
+    local = now.astimezone().replace(tzinfo=None)
     candidate = local.replace(hour=schedule.hour, minute=schedule.minute, second=0, microsecond=0)
     if schedule.kind == "daily":
         if candidate > local:
             candidate -= timedelta(days=1)
-        return candidate
+        return candidate.astimezone()
     if schedule.kind == "weekly":
         assert schedule.weekday is not None
         for back in range(0, 8):
             probe = candidate - timedelta(days=back)
             if _weekday_index(probe) == schedule.weekday and probe <= local:
-                return probe
+                return probe.astimezone()
         return None
     assert schedule.day is not None
     probe = candidate
@@ -324,7 +332,7 @@ def previous_occurrence(schedule: Schedule, now: datetime) -> datetime | None:
         except ValueError:
             dated = None
         if dated is not None and dated <= local:
-            return dated
+            return dated.astimezone()
         first = probe.replace(day=1)
         probe = (first - timedelta(days=1)).replace(
             hour=schedule.hour, minute=schedule.minute, second=0, microsecond=0
