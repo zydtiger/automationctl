@@ -12,9 +12,10 @@ import difflib
 import os
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import ClassVar
 
 from .. import paths
@@ -91,11 +92,13 @@ class Backend(ABC):
         runner: CommandRunner,
         executable: str,
         manifest_path: Path,
+        state_dir: Path | None = None,
     ) -> None:
         self.unit_dir = unit_dir
         self.runner = runner
         self.executable = executable
         self.manifest_path = manifest_path
+        self.state_dir = state_dir if state_dir is not None else paths.state_dir()
 
     # -- rendering ---------------------------------------------------------
 
@@ -183,14 +186,19 @@ class Backend(ABC):
         self,
         automations: Automations,
         tasks: Sequence[TaskSpec],
-        changed: Collection[str] = (),
+        desired: Mapping[str, str] = MappingProxyType({}),
     ) -> list[CommandResult]:
         """Enable and start whatever the given tasks require.
 
-        ``changed`` names the generated files this reconcile created or
-        updated. A backend whose reload is disruptive — launchd must unload an
-        agent before it can load a new definition — reloads only those, so an
+        ``desired`` is the rendered content of every generated file. A backend
+        whose reload is disruptive — launchd must unload an agent before it can
+        load a new definition — compares that content against what it recorded
+        the scheduler last accepting, and reloads only the differences, so an
         install that changes one task never kills another task's running job.
+
+        The comparison is deliberately against recorded *activation*, not
+        against the file diff: a file written by a reconcile whose activation
+        then failed must still count as needing a reload next time.
         """
 
     @abstractmethod
@@ -247,6 +255,7 @@ def create(
     executable: str | None = None,
     env: Mapping[str, str] | None = None,
     uid: int | None = None,
+    state_dir: Path | None = None,
 ) -> Backend:
     """Build a backend instance, filling every unset argument from the environment."""
     from .launchd import LaunchdBackend
@@ -260,6 +269,7 @@ def create(
         "runner": runner if runner is not None else SubprocessRunner(),
         "executable": executable if executable is not None else paths.executable(values),
         "manifest_path": manifest_path,
+        "state_dir": state_dir if state_dir is not None else paths.state_dir(values),
         "uid": uid,
     }
     if name == "systemd":

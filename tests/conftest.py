@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from automationctl.commands import CommandResult, RecordingRunner
 from automationctl.config import Automations, load
 
 HOST = "testhost"
@@ -55,6 +56,19 @@ allow_full_access = true
 argv = ["/bin/sleep", "30"]
 stdin = "prompt"
 """
+
+
+class FailingRunner(RecordingRunner):
+    """Records control commands and reports every one of them as refused.
+
+    Stands in for a scheduler that is absent or broken — the case where a
+    silent success is the worst possible outcome.
+    """
+
+    def run(self, argv: Sequence[str], *, timeout: float | None = None) -> CommandResult:
+        items = tuple(str(item) for item in argv)
+        self.calls.append(items)
+        return CommandResult(argv=items, returncode=1, stderr="refused")
 
 
 @contextmanager

@@ -108,6 +108,7 @@ def _session(
             name,
             manifest_path=automations.manifest.path,
             unit_dir=unit_dir,
+            state_dir=paths.state_dir(env),
             env=env,
         )
     except AutomationctlError as exc:
@@ -275,7 +276,12 @@ def status(
         typer.echo(f"{task.name}: {task.description}")
         typer.echo(f"  schedule: {task.schedule.text if task.schedule else 'manual'}")
         typer.echo(f"  substrate: {_enabled_label(session, task)}")
-        decision = catchup.decide(session.automations, task, state_dir=session.state_dir)
+        decision = catchup.decide(
+            session.automations,
+            task,
+            state_dir=session.state_dir,
+            backend=session.backend_name,
+        )
         typer.echo(f"  catch-up: {'due' if decision.due else 'not due'} ({decision.reason})")
         runs = records.recent_runs(session.state_dir, name, limit=limit)
         if not runs:
@@ -417,7 +423,9 @@ def catch_up(
 ) -> None:
     """Run tasks whose scheduled occurrence was missed while the machine was off."""
     session = _session(manifest, host)
-    decisions = catchup.plan(session.automations, state_dir=session.state_dir)
+    decisions = catchup.plan(
+        session.automations, state_dir=session.state_dir, backend=session.backend_name
+    )
     failures = 0
     for decision in decisions:
         marker = "due " if decision.due else "skip"
@@ -468,15 +476,11 @@ def install(
         return
     results = list(session.backend.apply(plan, desired))
     results.extend(session.backend.reload())
-    changed = {
-        change.path.name
-        for change in plan.changed
-        if change.action in {backends.CREATE, backends.UPDATE}
-    }
-    results.extend(session.backend.activate(session.automations, tasks, changed=changed))
-    failures = _report_results(results)
+    results.extend(session.backend.activate(session.automations, tasks, desired))
+    # The failure path speaks first: "installed N task(s)" after a refused
+    # scheduler command would be the last line a reader sees, and false.
+    _exit_on_substrate_failure(_report_results(results))
     typer.echo(f"installed {len(tasks)} task(s) into {session.backend.unit_dir}")
-    _exit_on_substrate_failure(failures)
 
 
 @app.command()
@@ -523,9 +527,8 @@ def pause(
     """Temporarily stop a task's schedule; the next install restores it."""
     session = _session(manifest, host, backend, unit_dir)
     task = session.task(task_name)
-    failures = _report_results(session.backend.pause(task))
+    _exit_on_substrate_failure(_report_results(session.backend.pause(task)))
     typer.echo(f"paused {task.name} (temporary; install re-asserts the repository state)")
-    _exit_on_substrate_failure(failures)
 
 
 @app.command()
@@ -539,9 +542,8 @@ def resume(
     """Undo a pause."""
     session = _session(manifest, host, backend, unit_dir)
     task = session.task(task_name)
-    failures = _report_results(session.backend.resume(task))
+    _exit_on_substrate_failure(_report_results(session.backend.resume(task)))
     typer.echo(f"resumed {task.name}")
-    _exit_on_substrate_failure(failures)
 
 
 @app.command()

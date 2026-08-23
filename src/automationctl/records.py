@@ -1,9 +1,10 @@
-"""Run records, last-run pointers, and retention.
+"""Run records, last-run pointers, activation state, and retention.
 
 Layout under the state directory::
 
     runs/<task>/<UTC-timestamp>-<shortid>/{meta.json,stdout.log,stderr.log,result.json}
     last/<task>.json
+    activated/<backend>.json
 
 Records are plain JSON so that any tool — or a human with ``jq`` — can read
 them without this package.
@@ -11,6 +12,7 @@ them without this package.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -120,6 +122,38 @@ def write_last(state_dir: Path, task: str, data: Mapping[str, Any]) -> Path:
 
 def read_last(state_dir: Path, task: str) -> dict[str, Any] | None:
     return read_json(last_path(state_dir, task))
+
+
+# --------------------------------------------------------------------------
+# activation state
+# --------------------------------------------------------------------------
+
+
+def content_hash(text: str) -> str:
+    """Return a stable digest of a generated file's content."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def activation_path(state_dir: Path, backend: str) -> Path:
+    return state_dir / "activated" / f"{backend}.json"
+
+
+def read_activation(state_dir: Path, backend: str) -> dict[str, str]:
+    """Return the content hash of each unit the scheduler last accepted.
+
+    A reconcile that writes a file but fails — or never gets — to load it must
+    not look "already activated" on the next run. The record is written only
+    after the scheduler confirms it took the new definition, so a missing or
+    stale entry means "reload this", which is the safe direction.
+    """
+    data = read_json(activation_path(state_dir, backend))
+    if data is None:
+        return {}
+    return {str(key): str(value) for key, value in data.items() if isinstance(value, str)}
+
+
+def write_activation(state_dir: Path, backend: str, activated: Mapping[str, str]) -> Path:
+    return write_json(activation_path(state_dir, backend), dict(activated))
 
 
 @dataclass(frozen=True)

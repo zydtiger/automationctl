@@ -9,8 +9,9 @@ touched and stale generated units are garbage-collected.
 from __future__ import annotations
 
 import os
-from collections.abc import Collection, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 
 from ..commands import CommandResult, CommandRunner
 from ..config import Automations
@@ -57,6 +58,7 @@ class SystemdBackend(Backend):
         runner: CommandRunner,
         executable: str,
         manifest_path: Path,
+        state_dir: Path | None = None,
         uid: int | None = None,
     ) -> None:
         super().__init__(
@@ -64,6 +66,7 @@ class SystemdBackend(Backend):
             runner=runner,
             executable=executable,
             manifest_path=manifest_path,
+            state_dir=state_dir,
         )
         self.uid = uid if uid is not None else os.getuid()
 
@@ -142,13 +145,15 @@ class SystemdBackend(Backend):
         self,
         automations: Automations,
         tasks: Sequence[TaskSpec],
-        changed: Collection[str] = (),
+        desired: Mapping[str, str] = MappingProxyType({}),
     ) -> list[CommandResult]:
         """Re-assert every scheduled timer.
 
-        ``changed`` is ignored here: ``enable --now`` is idempotent and never
-        interrupts a running service, so re-asserting the whole selection is
-        both harmless and exactly what ``install`` promises.
+        ``desired`` is ignored here, and so is any notion of activation
+        memory: ``enable --now`` is idempotent, never interrupts a running
+        service, and ``daemon-reload`` has already taught systemd the new
+        definitions. Re-asserting the whole selection is both harmless and
+        exactly what ``install`` promises.
         """
         results: list[CommandResult] = []
         for task in tasks:

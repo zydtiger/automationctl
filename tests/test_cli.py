@@ -270,6 +270,34 @@ def test_install_exits_non_zero_when_the_scheduler_refuses(
     assert (tmp_path / "units" / "automationctl-hello.timer").exists()
 
 
+def test_install_does_not_claim_success_after_a_refused_command(
+    cli: Tree, failing_recorder: RecordingRunner
+) -> None:
+    """The last line a reader sees must not be a false 'installed'."""
+    cli.write_task(
+        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+    )
+    result = invoke(cli, "install")
+    assert result.exit_code == 1
+    assert "installed 1 task(s)" not in result.output
+    assert "scheduler command(s) failed" in result.output
+
+
+def test_uninstall_all_is_permitted_for_an_undeclared_host(
+    cli: Tree, tmp_path: Path, recorder: RecordingRunner
+) -> None:
+    """Cleaning up a host the manifest no longer declares is what --all is for."""
+    cli.write_task(
+        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+    )
+    invoke(cli, "install")
+    assert list((tmp_path / "units").iterdir())
+
+    result = invoke_as(cli, "decommissioned", "uninstall", "--all")
+    assert result.exit_code == 0
+    assert list((tmp_path / "units").iterdir()) == []
+
+
 @pytest.mark.parametrize("verb", ["pause", "resume", "submit"])
 def test_task_verbs_exit_non_zero_when_the_scheduler_refuses(
     cli: Tree, failing_recorder: RecordingRunner, verb: str
@@ -344,6 +372,20 @@ def test_status_and_logs_read_the_run_records(cli: Tree) -> None:
     invoke(cli, "run", "hello")
     assert "ok" in invoke(cli, "status", "hello").output
     assert "recorded" in invoke(cli, "logs", "hello").output
+
+
+def test_status_prints_the_catch_up_decision(cli: Tree) -> None:
+    """A schedule catch-up cannot evaluate has to say so somewhere visible."""
+    cli.write_task(
+        "hello",
+        'description = "d"\ncommand = ["/bin/true"]\n\n'
+        "[schedule]\n"
+        'systemd = "Mon..Fri *-*-* 09:00:00"\n',
+    )
+    output = invoke(cli, "status", "hello").output
+    assert "catch-up: not due" in output
+    assert "opaque to catch-up" in output
+    assert "systemd Persistent=" in output
 
 
 def test_catch_up_dry_run_reports_decisions(cli: Tree) -> None:

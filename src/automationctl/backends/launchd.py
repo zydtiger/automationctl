@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import os
 import plistlib
-from collections.abc import Collection, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
+from .. import records
 from ..commands import CommandResult, CommandRunner
 from ..config import Automations
 from ..errors import BackendError
@@ -26,6 +28,10 @@ LABEL_PREFIX = "automationctl."
 PLIST_SUFFIX = ".plist"
 CATCHUP_LABEL = "automationctl.catchup"
 LAUNCHCTL = "launchctl"
+
+#: launchctl's exit code for "could not find service" — a definite "not loaded".
+#: Every other failure, 127 (launchctl absent) included, means "unknown".
+NOT_FOUND_RETURNCODE = 113
 
 
 def label_for(task: str) -> str:
@@ -58,6 +64,7 @@ class LaunchdBackend(Backend):
         runner: CommandRunner,
         executable: str,
         manifest_path: Path,
+        state_dir: Path | None = None,
         uid: int | None = None,
     ) -> None:
         super().__init__(
@@ -65,6 +72,7 @@ class LaunchdBackend(Backend):
             runner=runner,
             executable=executable,
             manifest_path=manifest_path,
+            state_dir=state_dir,
         )
         self.uid = uid if uid is not None else os.getuid()
 
@@ -144,49 +152,82 @@ class LaunchdBackend(Backend):
     def _label_of(self, filename: str) -> str:
         return filename[: -len(PLIST_SUFFIX)]
 
-    def _loaded(self, label: str) -> bool:
-        """Read-only probe: is this label bootstrapped in the domain?
+    def _load_state(self, label: str) -> bool | None:
+        """Read-only probe: ``True`` loaded, ``False`` not loaded, ``None`` unknown.
 
-        Its result is deliberately not reported to the caller — asking whether
-        something is loaded is not a control command, and a "no" must not be
-        counted as a failed operation.
+        Only launchctl's own "could not find service" code is read as a
+        definite no. Any other failure — launchctl missing, the domain
+        unreachable — is *unknown*, and callers must not mistake it for "there
+        is nothing to stop": that turns a broken substrate into a silent
+        success. The probe's own result is never reported as an operation,
+        since asking a question is not a control command.
         """
-        return self._launchctl("print", self.service_target(label)).ok
+        result = self._launchctl("print", self.service_target(label))
+        if result.ok:
+            return True
+        if result.returncode == NOT_FOUND_RETURNCODE:
+            return False
+        return None
 
     def activate(
         self,
         automations: Automations,
         tasks: Sequence[TaskSpec],
-        changed: Collection[str] = (),
+        desired: Mapping[str, str] = MappingProxyType({}),
     ) -> list[CommandResult]:
         """Re-assert the domain's view of every desired agent.
 
         ``enable`` runs for all of them, because that is what clears a
         ``pause`` and makes "install re-asserts the repository state" true.
         The disruptive part — bootout followed by bootstrap — runs only for
-        agents whose plist this reconcile actually rewrote; everything else is
-        left alone, and is only bootstrapped if it is not loaded at all.
+        agents whose definition differs from the one launchd last accepted;
+        everything else is left alone, and is bootstrapped only if it is not
+        loaded. An agent whose activation did not land keeps a stale recorded
+        hash, so the next install retries it.
         """
         results: list[CommandResult] = []
+        activated = records.read_activation(self.state_dir, self.name)
         labels = [label_for(task.name) for task in tasks] + [CATCHUP_LABEL]
         for label in labels:
             target = self.service_target(label)
-            path = self.unit_dir / plist_name(label)
+            filename = plist_name(label)
+            path = self.unit_dir / filename
+            content = desired.get(filename)
+            wanted = records.content_hash(content) if content is not None else None
+            stale = wanted is None or activated.get(label) != wanted
+
             results.append(self._launchctl("enable", target))
-            loaded = self._loaded(label)
-            if loaded and plist_name(label) in changed:
+            state = self._load_state(label)
+            if stale and state is not False:
                 results.append(self._launchctl("bootout", target))
-                loaded = False
-            if not loaded:
-                results.append(self._launchctl("bootstrap", self.domain, str(path)))
+                state = False
+            if state is not True:
+                started = self._launchctl("bootstrap", self.domain, str(path))
+                results.append(started)
+                if started.ok and wanted is not None:
+                    activated[label] = wanted
+            elif wanted is not None:
+                activated[label] = wanted
+        records.write_activation(self.state_dir, self.name, activated)
         return results
 
     def deactivate(self, filenames: Sequence[str]) -> list[CommandResult]:
+        """Unload the agents behind the given generated files.
+
+        A label the probe cannot speak for is booted out anyway: leaving an
+        agent bootstrapped against a plist we are about to delete is worse
+        than a redundant ``bootout``, and the command's own result decides
+        whether the verb succeeded.
+        """
         results: list[CommandResult] = []
+        activated = records.read_activation(self.state_dir, self.name)
         for filename in filenames:
             label = self._label_of(filename)
-            if self._loaded(label):
-                results.append(self._launchctl("bootout", self.service_target(label)))
+            activated.pop(label, None)
+            if self._load_state(label) is False:
+                continue
+            results.append(self._launchctl("bootout", self.service_target(label)))
+        records.write_activation(self.state_dir, self.name, activated)
         return results
 
     def submit(self, task: TaskSpec) -> list[CommandResult]:
@@ -205,10 +246,7 @@ class LaunchdBackend(Backend):
         ]
 
     def enabled(self, task: TaskSpec) -> bool | None:
-        result = self._launchctl("print", self.service_target(label_for(task.name)))
-        if result.returncode == 127:
-            return None
-        return result.ok
+        return self._load_state(label_for(task.name))
 
     def follow_argv(self, task: TaskSpec) -> tuple[str, ...] | None:
         return None
