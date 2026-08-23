@@ -13,8 +13,8 @@ dependencies = [
 ]
 
 [project.scripts]
-automationctl = "automationctl.cli:app"
-actl = "automationctl.cli:app"
+automationctl = "automationctl.cli:entrypoint"
+actl = "automationctl.cli:entrypoint"
 
 [build-system]
 requires = ["uv_build>=0.10,<0.11"]
