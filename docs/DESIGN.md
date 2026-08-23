@@ -153,6 +153,7 @@ Never branch per host.
 │   ├── stderr.log
 │   └── result.json              # summary_cmd output, when configured
 ├── last/<task>.json             # last outcome pointer (status, catch-up)
+├── activated/<backend>.json     # content hash the scheduler last accepted (§11.14)
 └── locks/<name>.lock
 
 ~/.config/systemd/user/automationctl-*.{service,timer}     # Linux, generated
@@ -599,9 +600,21 @@ systemd timers keep `RandomizedDelaySec` and never pass `--jitter`, so jitter
 is applied exactly once on either platform.
 
 A task with no schedule never carries `--jitter`. Its agent exists only so
-that `submit` has something to kick, and `submit` means now on both platforms:
-delaying an explicitly requested run by up to the configured jitter would make
-the same verb behave differently on macOS than on Linux.
+that `submit` has something to kick, and for such a task `submit` means now on
+both platforms.
+
+For a **scheduled** task with `randomized_delay`, `submit` diverges, and the
+divergence is inherent rather than chosen. systemd's `submit` starts the
+service directly, so it is immediate. launchd has no way to start an agent
+other than through the argv in its plist, so `launchctl kickstart` re-runs
+`exec --jitter` and the submitted run waits out the jitter like a scheduled
+one. The alternative — a second, jitter-free agent per task purely so that
+`submit` can bypass the first — doubles the generated surface to paper over a
+one-line difference.
+
+`run` is the immediate path on macOS: it is the foreground, streaming verb,
+never applies jitter unless asked, and is what "start this now and watch it"
+should mean on either platform anyway.
 
 ### 11.5 Strict argv, lenient prompts
 
@@ -673,6 +686,16 @@ the calendar arithmetic is local. Without this, catch-up on any host west or
 east of UTC both fires runs that were not missed and misses runs that were, by
 exactly the UTC offset.
 
+The calendar arithmetic itself runs on *naive* local wall-clock values, and
+the zone is re-attached only once a candidate date is settled. An aware
+datetime carries the concrete UTC offset in force at its own instant;
+subtracting days from it keeps that offset frozen, so walking back across a
+daylight-saving boundary lands every earlier candidate an hour off the wall
+clock the scheduler actually fired on. Resolving the offset per candidate date
+is what keeps "03:00" meaning 03:00 on both sides of a transition, and it is
+why the comparison happens on naive values rather than on the aware ones the
+records supply.
+
 Interval schedules are unaffected — elapsed time has no calendar.
 
 ### 11.10 Missed-run replay for escape-hatch schedules
@@ -686,9 +709,13 @@ escape hatch quietly weaker than the grammar it exists to extend. An explicit
 
 The wrapper's own catch-up declines these schedules: their contents are opaque
 to the neutral grammar, so it cannot compute a previous occurrence. It says so
-explicitly rather than reporting "not due" — `status` prints the catch-up
-decision and its reason for every task — and the backend's native missed-run
-handling (systemd's `Persistent=`) still applies.
+explicitly rather than reporting "not due", and `status` prints the catch-up
+decision and its reason for every task.
+
+The reason names the backend in play, because what happens to a missed
+occurrence then depends entirely on it: systemd's `Persistent=` replays one,
+and launchd has no equivalent. A single message claiming "the backend's own
+missed-run handling applies" would be a promise only one platform keeps.
 
 ### 11.11 Reconcile refuses an undeclared host
 
@@ -720,21 +747,43 @@ disk still describe the desired state; what failed is the substrate's
 agreement with it, and a green exit code on a host whose timers were never
 enabled is worse than no exit code at all.
 
-### 11.14 launchd reloads only what changed
+### 11.14 launchd reloads only what it has not already activated
 
 launchd cannot redefine a loaded agent in place: a changed plist means
-`bootout` then `bootstrap`, which kills whatever that agent is running.
-`install` therefore passes the reconcile plan's created and updated filenames
-to the backend, and only those agents are reloaded. Every desired agent still
-gets `launchctl enable`, which is what clears the persistent disable override
-left by `pause` and makes "install re-asserts the repository state" true on
-macOS; agents that are not loaded at all are bootstrapped. Whether an agent is
-loaded is settled by a read-only `launchctl print` probe, so no operation is
-issued that would predictably fail.
+`bootout` then `bootstrap`, which kills whatever that agent is running. Only
+agents whose definition launchd has not already accepted are reloaded.
+
+The comparison is against **recorded activation**, not against the file diff.
+`activated/<backend>.json` in the state directory holds a content hash per
+label, written only after that label's `bootstrap` succeeded, and the reload
+set is every label whose desired content hash differs from the recorded one.
+Diffing the rendered files against what is on disk cannot answer this
+question: `apply` has already written those files by the time activation runs,
+so an install whose activation fails — or is interrupted — would look
+identical to a successful one on the next pass, and launchd would keep running
+the old definition forever behind green installs. A hash that is missing or
+stale means "reload this", which is the safe direction to be wrong in.
+
+Every desired agent still gets `launchctl enable`, which is what clears the
+persistent disable override left by `pause` and makes "install re-asserts the
+repository state" true on macOS; agents that are not loaded at all are
+bootstrapped regardless of their hash.
+
+Load state comes from a read-only `launchctl print` probe with three answers,
+not two: loaded, not loaded, and **unknown**. Only launchctl's own
+"could not find service" code counts as a definite no; anything else —
+launchctl missing, the domain unreachable — is unknown, and an unknown label
+is booted out anyway rather than skipped. Treating "the probe failed" as
+"there is nothing to stop" is how a totally broken substrate turns into an
+`uninstall` that deletes every plist, issues no commands, and exits 0 while
+the agents keep running against files that no longer exist. The bootout's own
+result then flows into §11.13 and fails the verb, which is the outcome that
+tells the truth.
 
 systemd needs none of this: `enable --now` is idempotent and does not
-interrupt a running service, so every scheduled timer is re-asserted on every
-install.
+interrupt a running service, `daemon-reload` has already taught it the new
+definitions, so every scheduled timer is re-asserted on every install and no
+activation memory is kept.
 
 ### 11.15 Catch-up runs serially
 
