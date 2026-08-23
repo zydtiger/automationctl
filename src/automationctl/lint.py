@@ -8,12 +8,11 @@ marker — a visible, greppable, committed decision.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import Automations, load_prompt
+from .config import Automations, load_prompt, resolve_repo_path
 from .errors import AutomationctlError, ScheduleError, TemplateError
 from .locks import lock_path
 from .records import utcnow
@@ -25,7 +24,9 @@ ERROR = "error"
 WARNING = "warning"
 
 LINT_RUN_DIR = "<run-dir>"
-TASK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+#: Names automationctl generates agents for; a task may not claim them.
+RESERVED_TASK_NAMES = frozenset({"catchup"})
 
 
 @dataclass(frozen=True)
@@ -216,12 +217,17 @@ def _check_argv(
 
 
 def _check_name(task: TaskSpec, out: list[Diagnostic]) -> None:
-    if not TASK_NAME_RE.match(task.name):
+    """Reject names the generated substrate has already claimed.
+
+    The character rule is enforced at load time, in :mod:`spec`; what is left
+    here is the reserved-word rule, which belongs to the backends.
+    """
+    if task.name in RESERVED_TASK_NAMES:
         out.append(
             Diagnostic(
                 ERROR,
-                f"invalid task name: {task.name!r}; task file names become unit and agent "
-                "names, so they must match [A-Za-z0-9][A-Za-z0-9._-]*",
+                f"reserved task name: {task.name!r}; automationctl generates an agent of that "
+                "name, so a task using it would be silently replaced",
                 task.name,
                 task.path,
             )
@@ -235,7 +241,7 @@ def lint_task(automations: Automations, task: TaskSpec, backend: str) -> list[Di
     _check_exclusivity(task, out)
     runner = _resolve_runner(automations, task, out)
     if task.prompt_file is not None:
-        path = automations.manifest.root / task.prompt_file
+        path = resolve_repo_path(automations.manifest, task.prompt_file)
         if not path.exists():
             out.append(Diagnostic(ERROR, f"prompt_file not found: {path}", task.name, task.path))
     _check_schedule(task, backend, out)
@@ -252,10 +258,18 @@ def lint(
     backend: str,
     tasks: Sequence[str] | None = None,
 ) -> LintReport:
-    """Lint the manifest, host selection, and the requested tasks."""
+    """Lint the manifest, host selection, and the requested tasks.
+
+    ``tasks`` narrows the scan to named specs, and with it the load errors
+    reported. That scoping is what lets ``install`` gate on this host's
+    selection alone: a spec written for another host — a launchd-only escape
+    hatch, say — is not this host's problem to fix before it can install.
+    """
     out: list[Diagnostic] = []
+    scope = None if tasks is None else set(tasks)
     for error in automations.errors:
-        out.append(Diagnostic(ERROR, error.message, error.path.stem, error.path))
+        if scope is None or error.path.stem in scope:
+            out.append(Diagnostic(ERROR, error.message, error.path.stem, error.path))
 
     if not automations.host_declared:
         out.append(

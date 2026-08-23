@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from importlib.metadata import version
 from pathlib import Path
 
@@ -13,7 +13,7 @@ from typer.testing import CliRunner, Result
 from automationctl import backends, records
 from automationctl.backends import Backend
 from automationctl.cli import app
-from automationctl.commands import RecordingRunner
+from automationctl.commands import CommandResult, RecordingRunner
 
 runner = CliRunner()
 
@@ -43,6 +43,33 @@ def cli(tree: Tree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Tree:
 
 def invoke(cli: Tree, *args: str) -> Result:
     return runner.invoke(app, [*args, "--manifest", str(cli.manifest_path), "--host", "testhost"])
+
+
+def invoke_as(cli: Tree, host: str, *args: str) -> Result:
+    return runner.invoke(app, [*args, "--manifest", str(cli.manifest_path), "--host", host])
+
+
+@pytest.fixture
+def failing_recorder(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingRunner]:
+    """A scheduler that refuses every control command."""
+    recording = FailingRunner()
+    original = backends.create
+
+    def fake_create(name: str, **kwargs: object) -> Backend:
+        kwargs["runner"] = recording
+        return original(name, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(backends, "create", fake_create)
+    yield recording
+
+
+class FailingRunner(RecordingRunner):
+    """Records commands and reports every one of them as failed."""
+
+    def run(self, argv: Sequence[str], *, timeout: float | None = None) -> CommandResult:
+        items = tuple(str(item) for item in argv)
+        self.calls.append(items)
+        return CommandResult(argv=items, returncode=1, stderr="refused")
 
 
 def test_version_flag_reports_package_version() -> None:
@@ -186,6 +213,96 @@ def test_install_garbage_collects_stale_units(
     assert not (unit_dir / "automationctl-old.timer").exists()
     assert (unit_dir / "keep-me.service").exists()
     assert "systemctl --user disable --now automationctl-old.timer" in recorder.transcript
+
+
+def test_install_refuses_an_undeclared_host_and_removes_nothing(
+    cli: Tree, tmp_path: Path, recorder: RecordingRunner
+) -> None:
+    """A typo in --host must not garbage-collect the whole installation."""
+    cli.write_task(
+        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+    )
+    invoke(cli, "install")
+    installed = sorted(path.name for path in (tmp_path / "units").iterdir())
+    assert installed == ["automationctl-hello.service", "automationctl-hello.timer"]
+
+    result = invoke_as(cli, "typohost", "install")
+    assert result.exit_code != 0
+    assert "is not declared" in result.output
+    assert sorted(path.name for path in (tmp_path / "units").iterdir()) == installed
+
+
+def test_install_gate_ignores_specs_belonging_to_another_host(
+    cli: Tree, tmp_path: Path, recorder: RecordingRunner
+) -> None:
+    """A launchd-only escape hatch on the other host must not block this one."""
+    cli.write_manifest(
+        "schema_version = 1\n\n"
+        "[hosts.testhost]\n"
+        'tasks = ["mine"]\n\n'
+        "[hosts.otherhost]\n"
+        'tasks = ["theirs"]\n'
+    )
+    cli.write_task("mine", 'description = "d"\ncommand = ["/bin/true"]\n')
+    cli.write_task(
+        "theirs",
+        'description = "d"\ncommand = ["/bin/true"]\n\n'
+        "[schedule]\n"
+        "launchd = [{ Weekday = 1, Hour = 9, Minute = 0 }]\n",
+    )
+    result = invoke(cli, "install")
+    assert result.exit_code == 0
+    assert (tmp_path / "units" / "automationctl-mine.service").exists()
+    # The full-repository scan still reports the other host's problem.
+    assert invoke(cli, "lint").exit_code == 1
+
+
+def test_install_exits_non_zero_when_the_scheduler_refuses(
+    cli: Tree, tmp_path: Path, failing_recorder: RecordingRunner
+) -> None:
+    cli.write_task(
+        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+    )
+    result = invoke(cli, "install")
+    assert result.exit_code == 1
+    assert "scheduler command(s) failed" in result.output
+    # The files are still written: the desired state is on disk either way.
+    assert (tmp_path / "units" / "automationctl-hello.timer").exists()
+
+
+@pytest.mark.parametrize("verb", ["pause", "resume", "submit"])
+def test_task_verbs_exit_non_zero_when_the_scheduler_refuses(
+    cli: Tree, failing_recorder: RecordingRunner, verb: str
+) -> None:
+    cli.write_task(
+        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+    )
+    assert invoke(cli, verb, "hello").exit_code == 1
+
+
+def test_uninstall_exits_non_zero_when_the_scheduler_refuses(
+    cli: Tree, tmp_path: Path, failing_recorder: RecordingRunner
+) -> None:
+    unit_dir = tmp_path / "units"
+    unit_dir.mkdir()
+    (unit_dir / "automationctl-hello.timer").write_text("stale\n", encoding="utf-8")
+    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    assert invoke(cli, "uninstall", "--all").exit_code == 1
+
+
+def test_follow_reports_a_missing_log_program_cleanly(
+    cli: Tree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+
+    def missing(argv: list[str]) -> int:
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    monkeypatch.setattr("automationctl.cli.subprocess.call", missing)
+    result = invoke(cli, "logs", "hello", "--follow")
+    assert result.exit_code == 2
+    assert "cannot follow logs" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_pause_and_resume_are_substrate_only(cli: Tree, recorder: RecordingRunner) -> None:

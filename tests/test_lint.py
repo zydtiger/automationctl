@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 from conftest import Tree
 
 from automationctl.lint import ERROR, WARNING, lint
@@ -134,3 +137,35 @@ def test_lint_can_target_specific_tasks(tree: Tree) -> None:
     tree.write_task("broken", 'description = "d"\n')
     assert lint(tree.load(), backend="systemd", tasks=["hello"]).ok
     assert not lint(tree.load(), backend="systemd", tasks=["broken"]).ok
+
+
+def test_targeted_lint_ignores_another_task_that_fails_to_load(tree: Tree) -> None:
+    """A malformed spec belonging to another host must not block this one."""
+    tree.write_task("hello", 'description = "d"\ncommand = ["true"]\n')
+    tree.write_task("theirs", "description = 3\n")
+    assert not lint(tree.load(), backend="systemd").ok
+    assert lint(tree.load(), backend="systemd", tasks=["hello"]).ok
+
+
+def test_reserved_task_name_is_rejected(tree: Tree) -> None:
+    tree.write_task("catchup", 'description = "d"\ncommand = ["true"]\n')
+    assert any("reserved task name" in item for item in messages(tree))
+
+
+def test_invalid_task_name_is_rejected_at_load(tree: Tree) -> None:
+    tree.write_task("bad name", 'description = "d"\ncommand = ["true"]\n')
+    assert any("invalid task name" in item for item in messages(tree))
+
+
+def test_prompt_file_may_be_written_with_a_tilde(
+    tree: Tree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lint must resolve prompt_file exactly as the runtime does."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "shared.md").write_text("body", encoding="utf-8")
+    tree.write_task(
+        "hello",
+        'description = "d"\nrunner = "argv-runner"\nprompt_file = "~/prompts/shared.md"\n',
+    )
+    assert messages(tree) == []

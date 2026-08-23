@@ -129,6 +129,22 @@ def _lint_or_exit(session: Session, tasks: list[str] | None = None) -> None:
         raise _fail(f"lint found {len(report.errors)} error(s)", EXIT_FAILURE)
 
 
+def _require_declared_host(session: Session) -> None:
+    """Refuse to reconcile for a host the manifest does not declare.
+
+    An undeclared host selects no tasks, so a reconcile would compute an empty
+    desired state and garbage-collect every managed unit on the machine. A
+    typo in ``--host`` must not uninstall the installation.
+    """
+    if session.automations.host_declared:
+        return
+    raise _fail(
+        f"host {session.automations.host!r} is not declared in "
+        f"{session.automations.manifest.path}; refusing to reconcile, which would "
+        "remove every managed file. Add a [hosts.*] section or pass --host."
+    )
+
+
 def _exit_code_for(result: ExecResult) -> int:
     if result.exit_code < 0:
         return 128 + abs(result.exit_code)
@@ -145,15 +161,25 @@ def _run_task(session: Session, task: TaskSpec, *, jitter: bool) -> ExecResult:
     return exec_task(session.automations, task, options)
 
 
-def _report_results(results: list[CommandResult]) -> None:
+def _report_results(results: list[CommandResult]) -> int:
+    """Report every failed control command and return how many failed."""
+    failures = 0
     for result in results:
         if result.ok:
             continue
+        failures += 1
         typer.secho(
             f"warning: {result.display} exited {result.returncode}: {result.stderr.strip()}",
             fg=typer.colors.YELLOW,
             err=True,
         )
+    return failures
+
+
+def _exit_on_substrate_failure(failures: int) -> None:
+    """A scheduler that refused our command left the host in an unknown state."""
+    if failures:
+        raise _fail(f"{failures} scheduler command(s) failed", EXIT_FAILURE)
 
 
 def _print_table(rows: list[tuple[str, ...]]) -> None:
@@ -249,6 +275,8 @@ def status(
         typer.echo(f"{task.name}: {task.description}")
         typer.echo(f"  schedule: {task.schedule.text if task.schedule else 'manual'}")
         typer.echo(f"  substrate: {_enabled_label(session, task)}")
+        decision = catchup.decide(session.automations, task, state_dir=session.state_dir)
+        typer.echo(f"  catch-up: {'due' if decision.due else 'not due'} ({decision.reason})")
         runs = records.recent_runs(session.state_dir, name, limit=limit)
         if not runs:
             typer.echo("  no recorded runs")
@@ -290,7 +318,11 @@ def logs(
         argv = session.backend.follow_argv(task)
         if argv is None:
             raise _fail(f"the {session.backend_name} backend cannot follow live logs")
-        raise typer.Exit(subprocess.call(list(argv)))
+        try:
+            code = subprocess.call(list(argv))
+        except OSError as exc:
+            raise _fail(f"cannot follow logs: {argv[0]} is not available: {exc}") from exc
+        raise typer.Exit(code)
     latest = records.latest_run(session.state_dir, task.name)
     if latest is None:
         typer.echo(f"no recorded runs for {task.name}")
@@ -372,10 +404,8 @@ def submit(
     """Start a task in the background through the platform scheduler."""
     session = _session(manifest, host, backend, unit_dir)
     task = session.task(task_name)
-    results = session.backend.submit(task)
-    _report_results(results)
-    if any(not item.ok for item in results):
-        raise typer.Exit(EXIT_FAILURE)
+    failures = _report_results(session.backend.submit(task))
+    _exit_on_substrate_failure(failures)
     typer.echo(f"submitted {task.name} via {session.backend_name}")
 
 
@@ -428,7 +458,8 @@ def install(
 ) -> None:
     """Lint, render, reconcile, and enable this host's generated units."""
     session = _session(manifest, host, backend, unit_dir)
-    _lint_or_exit(session)
+    _require_declared_host(session)
+    _lint_or_exit(session, list(session.automations.selected_names()))
     tasks = session.automations.enabled_tasks()
     desired = session.backend.desired_files(session.automations, tasks)
     plan = session.backend.plan(desired)
@@ -437,9 +468,15 @@ def install(
         return
     results = list(session.backend.apply(plan, desired))
     results.extend(session.backend.reload())
-    results.extend(session.backend.activate(session.automations, tasks))
-    _report_results(results)
+    changed = {
+        change.path.name
+        for change in plan.changed
+        if change.action in {backends.CREATE, backends.UPDATE}
+    }
+    results.extend(session.backend.activate(session.automations, tasks, changed=changed))
+    failures = _report_results(results)
     typer.echo(f"installed {len(tasks)} task(s) into {session.backend.unit_dir}")
+    _exit_on_substrate_failure(failures)
 
 
 @app.command()
@@ -457,6 +494,9 @@ def uninstall(
         raise _fail("pass exactly one of a task name or --all")
     existing = session.backend.existing_files()
     if remove_all:
+        # No host guard here: --all is an explicit request that names every
+        # file it removes, and it is the right tool for cleaning up a host the
+        # manifest no longer declares.
         targets = sorted(existing)
     else:
         task = session.task(str(task_name))
@@ -469,7 +509,7 @@ def uninstall(
         (session.backend.unit_dir / name).unlink(missing_ok=True)
         typer.echo(f"removed: {session.backend.unit_dir / name}")
     results.extend(session.backend.reload())
-    _report_results(results)
+    _exit_on_substrate_failure(_report_results(results))
 
 
 @app.command()
@@ -483,8 +523,9 @@ def pause(
     """Temporarily stop a task's schedule; the next install restores it."""
     session = _session(manifest, host, backend, unit_dir)
     task = session.task(task_name)
-    _report_results(session.backend.pause(task))
+    failures = _report_results(session.backend.pause(task))
     typer.echo(f"paused {task.name} (temporary; install re-asserts the repository state)")
+    _exit_on_substrate_failure(failures)
 
 
 @app.command()
@@ -498,8 +539,9 @@ def resume(
     """Undo a pause."""
     session = _session(manifest, host, backend, unit_dir)
     task = session.task(task_name)
-    _report_results(session.backend.resume(task))
+    failures = _report_results(session.backend.resume(task))
     typer.echo(f"resumed {task.name}")
+    _exit_on_substrate_failure(failures)
 
 
 @app.command()
