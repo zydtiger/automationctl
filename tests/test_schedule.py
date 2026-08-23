@@ -208,7 +208,24 @@ def test_occurrences_resolve_the_offset_of_their_own_date(
         assert result.strftime("%H:%M") == "03:00"
 
 
+def test_daily_occurrence_walking_back_across_a_transition() -> None:
+    """The daily case only exposes the DST bug when it walks back a day."""
+    with local_tz("Europe/Berlin"):
+        # 2026-03-29 10:00 CEST is 08:00Z, before that day's 12:00 occurrence,
+        # so the most recent one is 12:00 on the 28th — still CET, at 11:00Z.
+        # Carrying today's +02:00 offset back a day would answer 10:00Z.
+        result = previous_occurrence(parse("daily 12:00"), moment("2026-03-29 08:00"))
+        assert result is not None
+        assert result == moment("2026-03-28 11:00")
+        assert result.strftime("%H:%M") == "12:00"
+
+
 def test_daily_occurrence_on_a_transition_day_keeps_the_wall_clock() -> None:
+    """Non-regression guard only: same-day resolution, no walk-back involved.
+
+    This case passes against the pre-fix code as well — it is here to pin the
+    same-day behaviour, not to discriminate. The test above does that.
+    """
     with local_tz("Europe/Berlin"):
         # 2026-03-29 08:00 CEST is 06:00Z; that day's 03:00 local occurrence
         # is already CEST, at 01:00Z.

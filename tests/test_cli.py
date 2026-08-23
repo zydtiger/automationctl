@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from importlib.metadata import version
 from pathlib import Path
 
 import pytest
-from conftest import Tree
+from conftest import FailingRunner, Tree
 from typer.testing import CliRunner, Result
 
 from automationctl import backends, records
 from automationctl.backends import Backend
 from automationctl.cli import app
-from automationctl.commands import CommandResult, RecordingRunner
+from automationctl.commands import RecordingRunner
 
 runner = CliRunner()
 
@@ -61,15 +61,6 @@ def failing_recorder(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingRunne
 
     monkeypatch.setattr(backends, "create", fake_create)
     yield recording
-
-
-class FailingRunner(RecordingRunner):
-    """Records commands and reports every one of them as failed."""
-
-    def run(self, argv: Sequence[str], *, timeout: float | None = None) -> CommandResult:
-        items = tuple(str(item) for item in argv)
-        self.calls.append(items)
-        return CommandResult(argv=items, returncode=1, stderr="refused")
 
 
 def test_version_flag_reports_package_version() -> None:
