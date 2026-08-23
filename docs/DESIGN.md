@@ -497,8 +497,13 @@ code:
    that is where `env_files` put them; a timer's ambient environment has none
    of it. In-wrapper notify is primary (works on both platforms); the systemd
    `OnFailure=` hook is a Linux-only backup for the case where the wrapper
-   itself dies.
+   itself dies. The whole dispatch is wrapped in a catch-all: a transport
+   reaches arbitrary third-party code, and step 10 is not negotiable.
 10. Exit with the child's code, so the substrate's own status reflects truth.
+    No notification failure may ever change this — not a refused connection,
+    not a malformed URL, not an exception nobody enumerated. A transport that
+    breaks is recorded as a failed notification in `meta.json` and nothing
+    more.
 
 ---
 
@@ -570,7 +575,10 @@ otherwise be duplicated or would fatten `cli.py`:
   manifest, the `automationctl` path embedded in units), each overridable by
   an environment variable so that tests and dry runs never touch real state.
 - `errors.py` — the shared exception hierarchy, imported by every module.
-- `commands.py` — the seam described in §11.2.
+- `commands.py` — the seam described in §11.2. A backend's state directory is
+  a required constructor argument for the same reason the seam exists: a
+  default that quietly reached for the real one is the single way a test could
+  write to the user's own state.
 - `catchup.py` — missed-run decisions; it needs both `schedule` and `records`
   and belongs to neither.
 - `doctor.py` — read-only host probes, kept out of the command surface.
@@ -753,16 +761,28 @@ launchd cannot redefine a loaded agent in place: a changed plist means
 `bootout` then `bootstrap`, which kills whatever that agent is running. Only
 agents whose definition launchd has not already accepted are reloaded.
 
-The comparison is against **recorded activation**, not against the file diff.
-`activated/<backend>.json` in the state directory holds a content hash per
-label, written only after that label's `bootstrap` succeeded, and the reload
-set is every label whose desired content hash differs from the recorded one.
-Diffing the rendered files against what is on disk cannot answer this
-question: `apply` has already written those files by the time activation runs,
-so an install whose activation fails — or is interrupted — would look
-identical to a successful one on the next pass, and launchd would keep running
-the old definition forever behind green installs. A hash that is missing or
-stale means "reload this", which is the safe direction to be wrong in.
+A label is reloaded when **either** of two independent signals says so, and it
+takes both to be correct.
+
+*Recorded activation.* `activated/<backend>.json` in the state directory holds
+a content hash per label, written only after that label's `bootstrap`
+succeeded. A hash that differs from the desired content — or is missing —
+means reload. This is what a file diff cannot see: `apply` has already written
+the files by the time activation runs, so an install whose activation failed
+or was interrupted would look identical to a successful one on the next pass,
+and launchd would keep running the old definition forever behind green
+installs.
+
+*The reconcile's own rewrites.* `install` passes the plan's created and
+updated filenames, captured before `apply` writes them. This is what the
+activation record cannot see: a plist hand-edited on disk and loaded by
+someone else — login loads everything in `~/Library/LaunchAgents` — still
+hashes to what we last activated, so the record says "nothing to do" while
+launchd runs the edit. Rewriting the file back is exactly the moment to
+reconverge it, and D8 says generated output is never hand-edited: hand edits
+are overwritten by design, which has to include the loaded copy.
+
+The union costs at most a needless reload, always in the safe direction.
 
 Every desired agent still gets `launchctl enable`, which is what clears the
 persistent disable override left by `pause` and makes "install re-asserts the
@@ -770,15 +790,21 @@ repository state" true on macOS; agents that are not loaded at all are
 bootstrapped regardless of their hash.
 
 Load state comes from a read-only `launchctl print` probe with three answers,
-not two: loaded, not loaded, and **unknown**. Only launchctl's own
-"could not find service" code counts as a definite no; anything else —
-launchctl missing, the domain unreachable — is unknown, and an unknown label
-is booted out anyway rather than skipped. Treating "the probe failed" as
-"there is nothing to stop" is how a totally broken substrate turns into an
-`uninstall` that deletes every plist, issues no commands, and exits 0 while
-the agents keep running against files that no longer exist. The bootout's own
-result then flows into §11.13 and fails the verb, which is the outcome that
-tells the truth.
+not two: loaded, not loaded, and **unknown**. Unknown is treated as needing a
+reload in both directions — `activate` boots out an unknown label before
+bootstrapping it, exactly as `deactivate` boots one out rather than skipping
+it. Treating "the probe failed" as "there is nothing to stop" is how a totally
+broken substrate turns into an `uninstall` that deletes every plist, issues no
+commands, and exits 0 while the agents keep running against files that no
+longer exist. Each command's own result then flows into §11.13 and fails the
+verb, which is the outcome that tells the truth.
+
+Only launchctl's "could not find service" code (113) is a definite no, and
+only when the domain itself answers: launchctl reports the same code for a
+label in a domain it cannot reach as for a label that genuinely is not loaded.
+So a 113 is qualified by a `launchctl print <domain>` probe, run lazily and at
+most once per verb — nothing pays for it unless a 113 actually turns up — and
+a domain that will not answer downgrades every 113 to unknown.
 
 systemd needs none of this: `enable --now` is idempotent and does not
 interrupt a running service, `daemon-reload` has already taught it the new
