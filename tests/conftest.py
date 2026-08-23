@@ -7,7 +7,12 @@ child process a test spawns is a stock POSIX tool.
 
 from __future__ import annotations
 
+import os
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -50,6 +55,31 @@ allow_full_access = true
 argv = ["/bin/sleep", "30"]
 stdin = "prompt"
 """
+
+
+@contextmanager
+def local_tz(name: str) -> Iterator[None]:
+    """Run a block with the process's local timezone forced to ``name``.
+
+    Schedules are local wall clock, so the tests that prove it have to control
+    what "local" means rather than inherit the build machine's zone.
+    """
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+def local_moment(text: str) -> datetime:
+    """Parse ``YYYY-MM-DD HH:MM`` as a local wall-clock instant."""
+    return datetime.strptime(text, "%Y-%m-%d %H:%M").astimezone()
 
 
 @dataclass

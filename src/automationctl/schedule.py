@@ -282,22 +282,30 @@ def _weekday_index(moment: datetime) -> int:
 def previous_occurrence(schedule: Schedule, now: datetime) -> datetime | None:
     """Return the most recent scheduled moment at or before ``now``.
 
+    Calendar times are **local wall clock**, because that is what both
+    backends do: systemd's ``OnCalendar`` and launchd's
+    ``StartCalendarInterval`` both fire against the machine's local time.
+    ``now`` may be given in any timezone — it is converted to local time
+    before the wall-clock fields are applied — and the returned instant is
+    timezone-aware, so comparing it against a UTC run record is exact.
+
     Interval and escape-hatch schedules return ``None``: the former is handled
     by elapsed-time comparison, the latter is opaque to the neutral grammar.
     """
     if not schedule.is_calendar:
         return None
     assert schedule.hour is not None and schedule.minute is not None
-    candidate = now.replace(hour=schedule.hour, minute=schedule.minute, second=0, microsecond=0)
+    local = now.astimezone()
+    candidate = local.replace(hour=schedule.hour, minute=schedule.minute, second=0, microsecond=0)
     if schedule.kind == "daily":
-        if candidate > now:
+        if candidate > local:
             candidate -= timedelta(days=1)
         return candidate
     if schedule.kind == "weekly":
         assert schedule.weekday is not None
         for back in range(0, 8):
             probe = candidate - timedelta(days=back)
-            if _weekday_index(probe) == schedule.weekday and probe <= now:
+            if _weekday_index(probe) == schedule.weekday and probe <= local:
                 return probe
         return None
     assert schedule.day is not None
@@ -307,7 +315,7 @@ def previous_occurrence(schedule: Schedule, now: datetime) -> datetime | None:
             dated = probe.replace(day=schedule.day)
         except ValueError:
             dated = None
-        if dated is not None and dated <= now:
+        if dated is not None and dated <= local:
             return dated
         first = probe.replace(day=1)
         probe = (first - timedelta(days=1)).replace(

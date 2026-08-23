@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
-from conftest import Tree
+import pytest
+from conftest import Tree, local_tz
 
 from automationctl import records
 from automationctl.catchup import decide, plan
 
 NOW = datetime(2026, 8, 23, 6, 0, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _local_is_utc() -> Iterator[None]:
+    """Schedules are local wall clock; pin local to UTC so NOW reads literally."""
+    with local_tz("UTC"):
+        yield
 
 
 def set_last(tree: Tree, task: str, started: str) -> None:
@@ -89,6 +98,35 @@ def test_custom_schedule_cannot_be_evaluated(tree: Tree) -> None:
         '[schedule]\nsystemd = "Mon..Fri *-*-* 09:00:00"\n',
     )
     assert decision(tree, "hello") == (False, "custom schedule cannot be evaluated")
+
+
+@pytest.mark.parametrize(
+    ("tz", "now_utc", "last_utc", "due", "why"),
+    [
+        # UTC+8, daily 03:00 local. "now" is 06:00 local on the 23rd, so the
+        # 03:00 local occurrence sits at 19:00Z on the 22nd.
+        ("Asia/Shanghai", "2026-08-22T22:00:00Z", "2026-08-22T20:00:00Z", False, "ran after it"),
+        ("Asia/Shanghai", "2026-08-22T22:00:00Z", "2026-08-22T18:00:00Z", True, "ran before it"),
+        # UTC-7, daily 03:00 local. "now" is 22:00 local on the 22nd, so the
+        # most recent occurrence is 03:00 local that morning, at 10:00Z.
+        ("America/Los_Angeles", "2026-08-23T05:00:00Z", "2026-08-22T11:00:00Z", False, "covered"),
+        ("America/Los_Angeles", "2026-08-23T05:00:00Z", "2026-08-22T09:00:00Z", True, "missed"),
+    ],
+)
+def test_catchup_decisions_follow_the_local_wall_clock(
+    tree: Tree, tz: str, now_utc: str, last_utc: str, due: bool, why: str
+) -> None:
+    tree.write_task("hello", 'description = "d"\ncommand = ["true"]\nschedule = "daily 03:00"\n')
+    set_last(tree, "hello", last_utc)
+    automations = tree.load()
+    with local_tz(tz):
+        result = decide(
+            automations,
+            automations.tasks["hello"],
+            state_dir=tree.state,
+            now=records.parse_isoformat(now_utc),
+        )
+    assert result.due is due, why
 
 
 def test_plan_covers_every_selected_task(tree: Tree) -> None:

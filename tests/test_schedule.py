@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from conftest import local_moment, local_tz
 
 from automationctl.errors import ScheduleError
 from automationctl.schedule import (
@@ -137,6 +138,7 @@ def moment(text: str) -> datetime:
     return datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=UTC)
 
 
+@pytest.mark.parametrize("tz", ["UTC", "Asia/Shanghai", "America/Los_Angeles"])
 @pytest.mark.parametrize(
     ("schedule_text", "now", "expected"),
     [
@@ -149,8 +151,35 @@ def moment(text: str) -> datetime:
         ("monthly 31 09:00", "2026-03-05 10:00", "2026-01-31 09:00"),
     ],
 )
-def test_previous_occurrence(schedule_text: str, now: str, expected: str) -> None:
-    assert previous_occurrence(parse(schedule_text), moment(now)) == moment(expected)
+def test_previous_occurrence_follows_local_wall_clock(
+    tz: str, schedule_text: str, now: str, expected: str
+) -> None:
+    with local_tz(tz):
+        assert previous_occurrence(parse(schedule_text), local_moment(now)) == local_moment(
+            expected
+        )
+
+
+@pytest.mark.parametrize(
+    ("tz", "now_utc", "expected_local", "expected_utc"),
+    [
+        # UTC+8: 22:00Z is already 06:00 the next local day, so the 03:00 local
+        # occurrence has passed and sits at 19:00Z of the previous day.
+        ("Asia/Shanghai", "2026-08-22 22:00", "2026-08-23 03:00", "2026-08-22 19:00"),
+        # UTC-7: 05:00Z is still the previous local evening, so the most recent
+        # 03:00 local occurrence is that same local morning, at 10:00Z.
+        ("America/Los_Angeles", "2026-08-23 05:00", "2026-08-22 03:00", "2026-08-22 10:00"),
+    ],
+)
+def test_a_utc_instant_resolves_against_the_local_calendar(
+    tz: str, now_utc: str, expected_local: str, expected_utc: str
+) -> None:
+    """Both backends fire on local time, so a UTC 'now' must not shift the day."""
+    with local_tz(tz):
+        result = previous_occurrence(parse("daily 03:00"), moment(now_utc))
+        assert result is not None
+        assert result == moment(expected_utc)
+        assert result.strftime("%Y-%m-%d %H:%M") == expected_local
 
 
 def test_previous_occurrence_is_undefined_for_intervals() -> None:
