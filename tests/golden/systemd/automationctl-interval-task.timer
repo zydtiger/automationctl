@@ -5,8 +5,8 @@ Description=automationctl timer: interval-task
 
 [Timer]
 Unit=automationctl-interval-task.service
-OnBootSec=900s
-OnUnitActiveSec=900s
+OnBootSec=15m
+OnUnitActiveSec=15m
 
 [Install]
 WantedBy=timers.target

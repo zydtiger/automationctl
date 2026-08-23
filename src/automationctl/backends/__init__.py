@@ -12,7 +12,7 @@ import difflib
 import os
 import sys
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
@@ -179,8 +179,19 @@ class Backend(ABC):
         return []
 
     @abstractmethod
-    def activate(self, automations: Automations, tasks: Sequence[TaskSpec]) -> list[CommandResult]:
-        """Enable and start whatever the given tasks require."""
+    def activate(
+        self,
+        automations: Automations,
+        tasks: Sequence[TaskSpec],
+        changed: Collection[str] = (),
+    ) -> list[CommandResult]:
+        """Enable and start whatever the given tasks require.
+
+        ``changed`` names the generated files this reconcile created or
+        updated. A backend whose reload is disruptive — launchd must unload an
+        agent before it can load a new definition — reloads only those, so an
+        install that changes one task never kills another task's running job.
+        """
 
     @abstractmethod
     def deactivate(self, filenames: Sequence[str]) -> list[CommandResult]:

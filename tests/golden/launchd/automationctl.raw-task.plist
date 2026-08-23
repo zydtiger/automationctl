@@ -4,7 +4,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>automationctl.manual-task</string>
+	<string>automationctl.raw-task</string>
 	<key>ProcessType</key>
 	<string>Background</string>
 	<key>ProgramArguments</key>
@@ -13,9 +13,19 @@
 		<string>exec</string>
 		<string>--manifest</string>
 		<string>/home/example/automations/manifest.toml</string>
-		<string>manual-task</string>
+		<string>--jitter</string>
+		<string>raw-task</string>
 	</array>
 	<key>RunAtLoad</key>
 	<false/>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>9</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+		<key>Weekday</key>
+		<integer>1</integer>
+	</dict>
 </dict>
 </plist>

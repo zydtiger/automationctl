@@ -22,7 +22,14 @@ timeout = "10m"
 randomized_delay = "5m"
 
 [hosts.testhost]
-tasks = ["calendar-task", "interval-task", "weekly-task", "manual-task", "off-task"]
+tasks = [
+  "calendar-task",
+  "interval-task",
+  "weekly-task",
+  "manual-task",
+  "raw-task",
+  "off-task",
+]
 """
 
 TASKS = {
@@ -46,6 +53,13 @@ TASKS = {
         "persistent = false\n"
     ),
     "manual-task": ('description = "Manual task"\ncommand = ["/usr/bin/env", "true"]\n'),
+    "raw-task": (
+        'description = "Escape hatch task"\n'
+        'command = ["/usr/bin/env", "true"]\n\n'
+        "[schedule]\n"
+        'systemd = "Mon..Fri *-*-* 09:00:00"\n'
+        "launchd = [{ Weekday = 1, Hour = 9, Minute = 0 }]\n"
+    ),
     "off-task": (
         'description = "Disabled task"\n'
         'command = ["/usr/bin/env", "true"]\n'
@@ -101,6 +115,25 @@ def test_manual_tasks_get_a_service_but_no_timer(
     assert "automationctl-manual-task.timer" not in files
 
 
+def test_escape_hatch_schedules_stay_persistent(
+    rendered: tuple[SystemdBackend, Automations, dict[str, str]],
+) -> None:
+    """A per-backend calendar expression must not silently lose missed-run replay."""
+    _, _, files = rendered
+    timer = files["automationctl-raw-task.timer"]
+    assert "OnCalendar=Mon..Fri *-*-* 09:00:00" in timer
+    assert "Persistent=true" in timer
+
+
+def test_interval_timers_use_the_documented_unit_form(
+    rendered: tuple[SystemdBackend, Automations, dict[str, str]],
+) -> None:
+    _, _, files = rendered
+    timer = files["automationctl-interval-task.timer"]
+    assert "OnUnitActiveSec=15m" in timer
+    assert "OnBootSec=15m" in timer
+
+
 def test_plan_creates_updates_deletes_and_leaves_alone(
     rendered: tuple[SystemdBackend, Automations, dict[str, str]],
 ) -> None:
@@ -150,6 +183,7 @@ def test_activate_enables_only_scheduled_timers(
         "systemctl --user enable --now automationctl-calendar-task.timer",
         "systemctl --user enable --now automationctl-interval-task.timer",
         "systemctl --user enable --now automationctl-weekly-task.timer",
+        "systemctl --user enable --now automationctl-raw-task.timer",
     ]
 
 

@@ -9,7 +9,7 @@ touched and stale generated units are garbage-collected.
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 from ..commands import CommandResult, CommandRunner
@@ -138,7 +138,18 @@ class SystemdBackend(Backend):
     def reload(self) -> list[CommandResult]:
         return [self._systemctl("daemon-reload")]
 
-    def activate(self, automations: Automations, tasks: Sequence[TaskSpec]) -> list[CommandResult]:
+    def activate(
+        self,
+        automations: Automations,
+        tasks: Sequence[TaskSpec],
+        changed: Collection[str] = (),
+    ) -> list[CommandResult]:
+        """Re-assert every scheduled timer.
+
+        ``changed`` is ignored here: ``enable --now`` is idempotent and never
+        interrupts a running service, so re-asserting the whole selection is
+        both harmless and exactly what ``install`` promises.
+        """
         results: list[CommandResult] = []
         for task in tasks:
             if task.schedule is None:

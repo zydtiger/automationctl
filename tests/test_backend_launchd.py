@@ -13,6 +13,7 @@ from automationctl.backends import DELETE, UNCHANGED
 from automationctl.backends.launchd import CATCHUP_LABEL, LaunchdBackend
 from automationctl.commands import CommandResult, RecordingRunner
 from automationctl.config import Automations
+from automationctl.errors import BackendError
 
 GOLDEN = Path(__file__).parent / "golden" / "launchd"
 
@@ -116,18 +117,80 @@ def test_plan_garbage_collects_stale_agents(
     assert (backend.unit_dir / "com.example.other.plist").exists()
 
 
-def test_activate_reloads_every_agent_including_catchup(
+def test_activate_leaves_unchanged_agents_running(
+    rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
+) -> None:
+    """A no-op install must not bootout agents, which would kill running jobs."""
+    backend, automations, _ = rendered
+    backend.activate(automations, automations.enabled_tasks(), changed=())
+    runner = backend.runner
+    assert isinstance(runner, RecordingRunner)
+    assert not any("bootout" in line for line in runner.transcript)
+    assert not any("bootstrap" in line for line in runner.transcript)
+    assert "launchctl enable gui/501/automationctl.calendar-task" in runner.transcript
+    assert "launchctl enable gui/501/automationctl.catchup" in runner.transcript
+
+
+def test_activate_reloads_only_the_agents_this_install_rewrote(
     rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
 ) -> None:
     backend, automations, _ = rendered
-    backend.activate(automations, automations.enabled_tasks())
+    backend.activate(
+        automations,
+        automations.enabled_tasks(),
+        changed={"automationctl.calendar-task.plist"},
+    )
     runner = backend.runner
     assert isinstance(runner, RecordingRunner)
-    assert runner.transcript[0] == "launchctl bootout gui/501/automationctl.calendar-task"
-    assert runner.transcript[1] == (
+    booted_out = [line for line in runner.transcript if "bootout" in line]
+    assert booted_out == ["launchctl bootout gui/501/automationctl.calendar-task"]
+    assert (
         f"launchctl bootstrap gui/501 {backend.unit_dir}/automationctl.calendar-task.plist"
+        in runner.transcript
     )
-    assert runner.transcript[-1].endswith("automationctl.catchup.plist")
+
+
+def test_activate_enables_before_bootstrap_so_install_restores_a_pause(
+    tree: Tree, tmp_path: Path
+) -> None:
+    """`pause` leaves a persistent disable override; `install` has to clear it."""
+    tree.write_manifest(MANIFEST)
+    for name, text in TASKS.items():
+        tree.write_task(name, text)
+    automations = tree.load()
+    label = "automationctl.calendar-task"
+    probe = ("launchctl", "print", f"gui/501/{label}")
+    runner = RecordingRunner(responses={probe: CommandResult(probe, 113, stderr="not loaded")})
+    backend = LaunchdBackend(
+        unit_dir=tmp_path / "agents",
+        runner=runner,
+        executable=FIXED_EXECUTABLE,
+        manifest_path=FIXED_MANIFEST,
+        uid=501,
+    )
+    backend.activate(automations, [automations.tasks["calendar-task"]])
+
+    relevant = [line for line in runner.transcript if label in line and "print" not in line]
+    assert relevant == [
+        f"launchctl enable gui/501/{label}",
+        f"launchctl bootstrap gui/501 {backend.unit_dir}/{label}.plist",
+    ]
+
+
+def test_desired_files_never_lose_a_task_to_the_catchup_agent(tree: Tree, tmp_path: Path) -> None:
+    """The reserved label must refuse, not quietly overwrite the task."""
+    tree.write_manifest('schema_version = 1\n\n[hosts.testhost]\ntasks = ["catchup"]\n')
+    tree.write_task("catchup", 'description = "d"\ncommand = ["/bin/true"]\n')
+    automations = tree.load()
+    backend = LaunchdBackend(
+        unit_dir=tmp_path / "agents",
+        runner=RecordingRunner(),
+        executable=FIXED_EXECUTABLE,
+        manifest_path=FIXED_MANIFEST,
+        uid=501,
+    )
+    with pytest.raises(BackendError, match="reserved"):
+        backend.desired_files(automations, automations.enabled_tasks())
 
 
 def test_control_verbs_use_the_expected_commands(

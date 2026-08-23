@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import os
 import plistlib
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any
 
 from ..commands import CommandResult, CommandRunner
 from ..config import Automations
+from ..errors import BackendError
 from ..schedule import to_launchd
 from ..spec import TaskSpec, effective_randomized_delay
 from . import GENERATED_HEADER, Backend, HealthCheck
@@ -83,7 +84,12 @@ class LaunchdBackend(Backend):
         return (plist_name(label_for(task.name)),)
 
     def render_task(self, automations: Automations, task: TaskSpec) -> str:
-        jitter = effective_randomized_delay(automations.manifest, task) > 0
+        # Jitter spreads scheduled starts. A task with no schedule only ever
+        # runs because someone asked for it now, and `submit` must be immediate
+        # on both platforms, so an unscheduled agent never carries --jitter.
+        jitter = (
+            task.schedule is not None and effective_randomized_delay(automations.manifest, task) > 0
+        )
         data: dict[str, Any] = {
             "Label": label_for(task.name),
             "ProgramArguments": self.exec_argv(task, jitter=jitter),
@@ -117,9 +123,16 @@ class LaunchdBackend(Backend):
         return dump_plist(data)
 
     def desired_files(self, automations: Automations, tasks: Sequence[TaskSpec]) -> dict[str, str]:
-        files: dict[str, str] = {
-            plist_name(label_for(task.name)): self.render_task(automations, task) for task in tasks
-        }
+        files: dict[str, str] = {}
+        for task in tasks:
+            name = plist_name(label_for(task.name))
+            if name == plist_name(CATCHUP_LABEL):
+                # lint reserves the name; refuse rather than silently drop the
+                # task by overwriting it with the catch-up agent below.
+                raise BackendError(
+                    f"task {task.name!r} collides with the reserved {CATCHUP_LABEL} agent"
+                )
+            files[name] = self.render_task(automations, task)
         files[plist_name(CATCHUP_LABEL)] = self.render_catchup()
         return files
 
@@ -131,20 +144,50 @@ class LaunchdBackend(Backend):
     def _label_of(self, filename: str) -> str:
         return filename[: -len(PLIST_SUFFIX)]
 
-    def activate(self, automations: Automations, tasks: Sequence[TaskSpec]) -> list[CommandResult]:
+    def _loaded(self, label: str) -> bool:
+        """Read-only probe: is this label bootstrapped in the domain?
+
+        Its result is deliberately not reported to the caller — asking whether
+        something is loaded is not a control command, and a "no" must not be
+        counted as a failed operation.
+        """
+        return self._launchctl("print", self.service_target(label)).ok
+
+    def activate(
+        self,
+        automations: Automations,
+        tasks: Sequence[TaskSpec],
+        changed: Collection[str] = (),
+    ) -> list[CommandResult]:
+        """Re-assert the domain's view of every desired agent.
+
+        ``enable`` runs for all of them, because that is what clears a
+        ``pause`` and makes "install re-asserts the repository state" true.
+        The disruptive part — bootout followed by bootstrap — runs only for
+        agents whose plist this reconcile actually rewrote; everything else is
+        left alone, and is only bootstrapped if it is not loaded at all.
+        """
         results: list[CommandResult] = []
         labels = [label_for(task.name) for task in tasks] + [CATCHUP_LABEL]
         for label in labels:
+            target = self.service_target(label)
             path = self.unit_dir / plist_name(label)
-            results.append(self._launchctl("bootout", self.service_target(label)))
-            results.append(self._launchctl("bootstrap", self.domain, str(path)))
+            results.append(self._launchctl("enable", target))
+            loaded = self._loaded(label)
+            if loaded and plist_name(label) in changed:
+                results.append(self._launchctl("bootout", target))
+                loaded = False
+            if not loaded:
+                results.append(self._launchctl("bootstrap", self.domain, str(path)))
         return results
 
     def deactivate(self, filenames: Sequence[str]) -> list[CommandResult]:
-        return [
-            self._launchctl("bootout", self.service_target(self._label_of(filename)))
-            for filename in filenames
-        ]
+        results: list[CommandResult] = []
+        for filename in filenames:
+            label = self._label_of(filename)
+            if self._loaded(label):
+                results.append(self._launchctl("bootout", self.service_target(label)))
+        return results
 
     def submit(self, task: TaskSpec) -> list[CommandResult]:
         return [self._launchctl("kickstart", "-k", self.service_target(label_for(task.name)))]
