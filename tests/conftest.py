@@ -44,6 +44,11 @@ argv = ["/bin/echo", "{prompt}"]
 [runners.full-runner]
 argv = ["/bin/echo", "--danger"]
 allow_full_access = true
+
+# A child that is handed a prompt on stdin and never reads it.
+[runners.sleep-runner]
+argv = ["/bin/sleep", "30"]
+stdin = "prompt"
 """
 
 

@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -47,6 +47,7 @@ from .records import (
 from .spec import (
     TaskSpec,
     effective_on_failure,
+    effective_persistent,
     effective_randomized_delay,
     effective_timeout,
 )
@@ -73,6 +74,21 @@ DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 KILL_GRACE_SECONDS = 30.0
 VERSION_PROBE_TIMEOUT = 5.0
 STDERR_TAIL_LINES = 20
+
+
+def effective_snapshot(automations: Automations, task: TaskSpec) -> dict[str, Any]:
+    """Return the task fields after manifest defaults have been applied.
+
+    A run record has to answer "why did this task time out after 30 minutes"
+    even when the spec says nothing about a timeout, so the resolved values go
+    in beside the raw spec snapshot.
+    """
+    return {
+        "timeout_seconds": effective_timeout(automations.manifest, task),
+        "on_failure": list(effective_on_failure(automations.manifest, task)),
+        "randomized_delay_seconds": effective_randomized_delay(automations.manifest, task),
+        "persistent": effective_persistent(automations.manifest, task),
+    }
 
 
 def tool_version() -> str:
@@ -110,8 +126,16 @@ def build_env(
     task: TaskSpec,
     ambient: Mapping[str, str],
     run_dir: Path,
+    *,
+    strict: bool = True,
 ) -> dict[str, str]:
-    """Build the child environment: minimal base, path_prepend, env files, task env."""
+    """Build the child environment: minimal base, path_prepend, env files, task env.
+
+    ``strict=False`` skips unreadable env files instead of failing. It is for
+    callers that only want to see the environment a run *would* get — `doctor`
+    probing PATH, and the failure-notification path, which must still deliver
+    an alert when the very problem being reported is a missing env file.
+    """
     env: dict[str, str] = {key: ambient[key] for key in BASE_ENV_KEYS if key in ambient}
     env.setdefault("HOME", str(Path.home()))
 
@@ -119,7 +143,11 @@ def build_env(
     env["PATH"] = os.pathsep.join([*prepend, DEFAULT_PATH]) if prepend else DEFAULT_PATH
 
     for item in (*automations.host_config.env_files, *task.env_files):
-        env.update(parse_env_file(paths.expand(item)))
+        try:
+            env.update(parse_env_file(paths.expand(item)))
+        except ConfigError:
+            if strict:
+                raise
 
     env.update(task.env)
     env["AUTOMATIONCTL_TASK"] = task.name
@@ -167,6 +195,24 @@ class ExecResult:
     @property
     def failed(self) -> bool:
         return self.status in records.FAILURE_STATUSES
+
+
+def _write_stdin(handle: IO[bytes], payload: bytes) -> None:
+    """Feed the prompt to the child from its own thread.
+
+    A prompt larger than the pipe buffer blocks until the child reads it, and
+    an unattended agent that never reads stdin would otherwise hold the
+    wrapper hostage past its own timeout. Writing off-thread keeps the
+    deadline enforceable; the write simply fails once the child is killed.
+    """
+    try:
+        handle.write(payload)
+        handle.flush()
+    except (OSError, ValueError):
+        pass
+    finally:
+        with suppress(OSError, ValueError):
+            handle.close()
 
 
 def _pump(source: IO[bytes], sink: Path, passthrough: TextIO) -> None:
@@ -243,6 +289,25 @@ def _read_result(run_dir: Path) -> str:
     return json.dumps(data, sort_keys=True)[:500]
 
 
+def _notify_env(
+    automations: Automations,
+    task: TaskSpec,
+    options: ExecOptions,
+    run_dir: Path,
+) -> Mapping[str, str]:
+    """Return the environment notification transports resolve variables from.
+
+    Notification credentials — an ntfy URL, a webhook token — live in
+    ``env_files`` alongside the run's other secrets, never in the ambient
+    environment of a timer-started process. Notify therefore reads the same
+    environment the child would have received.
+    """
+    try:
+        return build_env(automations, task, options.env, run_dir, strict=False)
+    except AutomationctlError:
+        return options.env
+
+
 def _finalize(
     automations: Automations,
     task: TaskSpec,
@@ -317,7 +382,7 @@ def _finalize(
                     references,
                     automations.manifest,
                     event,
-                    env=options.env,
+                    env=_notify_env(automations, task, options, run_dir),
                     runner=options.notify_runner,
                     sender=options.notify_sender,
                 )
@@ -391,6 +456,7 @@ def exec_task(automations: Automations, task: TaskSpec, options: ExecOptions) ->
         "manifest": str(automations.manifest.path),
         "tool_version": tool_version(),
         "spec": task.snapshot(),
+        "effective": effective_snapshot(automations, task),
         "started_at": isoformat(started),
         "status": "running",
     }
@@ -487,13 +553,14 @@ def _execute(
     for pump in pumps:
         pump.start()
 
+    writer: threading.Thread | None = None
     if invocation.stdin_text is not None and process.stdin is not None:
-        try:
-            process.stdin.write(invocation.stdin_text.encode("utf-8"))
-        except BrokenPipeError:
-            pass
-        finally:
-            process.stdin.close()
+        writer = threading.Thread(
+            target=_write_stdin,
+            args=(process.stdin, invocation.stdin_text.encode("utf-8")),
+            daemon=True,
+        )
+        writer.start()
 
     status = STATUS_OK
     reason = ""
@@ -507,6 +574,8 @@ def _execute(
 
     for pump in pumps:
         pump.join(timeout=10)
+    if writer is not None:
+        writer.join(timeout=10)
 
     if status != STATUS_TIMEOUT and exit_code != 0:
         status = STATUS_FAILED
