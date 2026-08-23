@@ -1,0 +1,98 @@
+"""Read-only host probes."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from conftest import FIXED_EXECUTABLE, FIXED_MANIFEST, Tree
+
+from automationctl import doctor
+from automationctl.backends.systemd import SystemdBackend
+from automationctl.commands import RecordingRunner
+
+
+def probe(tree: Tree, tmp_path: Path, env: dict[str, str] | None = None) -> doctor.DoctorReport:
+    automations = tree.load()
+    backend = SystemdBackend(
+        unit_dir=tmp_path / "units",
+        runner=RecordingRunner(),
+        executable=FIXED_EXECUTABLE,
+        manifest_path=FIXED_MANIFEST,
+        uid=1000,
+    )
+    return doctor.run(
+        automations,
+        backend,
+        env=env if env is not None else {"HOME": str(tmp_path)},
+        state_dir=tree.state,
+    )
+
+
+def details(report: doctor.DoctorReport, name: str) -> list[str]:
+    return [check.detail for check in report.checks if check.name == name]
+
+
+def failures(report: doctor.DoctorReport) -> list[str]:
+    return [check.detail for check in report.checks if not check.ok]
+
+
+def test_binaries_are_resolved_through_the_env_file_path_override(
+    tree: Tree, tmp_path: Path
+) -> None:
+    """An env file may set PATH; doctor must probe the PATH the run will get."""
+    bin_dir = tmp_path / "opt" / "bin"
+    bin_dir.mkdir(parents=True)
+    tool = bin_dir / "only-here"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(0o755)
+
+    env_file = tmp_path / "agent-env"
+    env_file.write_text(f"PATH={bin_dir}:/usr/bin:/bin\n", encoding="utf-8")
+    tree.write_manifest(
+        f'schema_version = 1\n\n[hosts.testhost]\ntasks = ["hello"]\nenv_files = ["{env_file}"]\n'
+    )
+    tree.write_task("hello", 'description = "d"\ncommand = ["only-here"]\n')
+
+    report = probe(tree, tmp_path)
+    assert details(report, "binary") == [f"only-here -> {tool}"]
+
+
+def test_a_missing_absolute_binary_is_reported(tree: Tree, tmp_path: Path) -> None:
+    """An absolute path is not proof of existence."""
+    tree.write_task("hello", f'description = "d"\ncommand = ["{tmp_path}/no-such-tool"]\n')
+    report = probe(tree, tmp_path)
+    assert details(report, "binary") == [f"{tmp_path}/no-such-tool not found or not executable"]
+    assert not report.ok
+
+
+def test_a_non_executable_absolute_binary_is_reported(tree: Tree, tmp_path: Path) -> None:
+    target = tmp_path / "not-executable"
+    target.write_text("", encoding="utf-8")
+    target.chmod(0o644)
+    tree.write_task("hello", f'description = "d"\ncommand = ["{target}"]\n')
+    report = probe(tree, tmp_path)
+    assert details(report, "binary") == [f"{target} not found or not executable"]
+
+
+def test_an_executable_absolute_binary_passes(tree: Tree, tmp_path: Path) -> None:
+    tree.write_task("hello", 'description = "d"\ncommand = ["/bin/echo", "hi"]\n')
+    report = probe(tree, tmp_path)
+    assert details(report, "binary") == ["/bin/echo -> /bin/echo"]
+
+
+def test_an_undeclared_host_fails_the_report(tree: Tree, tmp_path: Path) -> None:
+    tree.write_manifest("schema_version = 1\n\n[hosts.elsewhere]\ntasks = []\n")
+    report = probe(tree, tmp_path)
+    assert not report.ok
+    assert any("has no [hosts.*] section" in detail for detail in failures(report))
+
+
+def test_a_missing_env_file_is_reported(tree: Tree, tmp_path: Path) -> None:
+    tree.write_manifest(
+        "schema_version = 1\n\n[hosts.testhost]\n"
+        'tasks = ["hello"]\n'
+        f'env_files = ["{tmp_path}/absent"]\n'
+    )
+    tree.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    report = probe(tree, tmp_path)
+    assert any("missing or unreadable" in detail for detail in details(report, "env file"))

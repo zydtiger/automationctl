@@ -7,6 +7,7 @@ unattended automation is a silent behaviour change.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -18,6 +19,9 @@ from .schedule import Schedule, parse_duration
 from .schedule import parse as parse_schedule
 
 SCHEMA_VERSION = 1
+
+#: A task name becomes a unit name, a launchd label, and a path component.
+TASK_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 TASK_KEYS = frozenset(
     {
@@ -369,7 +373,24 @@ def parse_runners(data: Mapping[str, Any], path: Path) -> dict[str, Runner]:
     return runners
 
 
+def validate_task_name(name: str, path: Path) -> None:
+    """Reject a task name that cannot safely become a unit name or path segment.
+
+    The name is used verbatim as a systemd unit name, a launchd label, and a
+    run-directory component, so it is checked where specs are loaded rather
+    than only in ``lint``: no code path may reach the filesystem with a name
+    lint would have rejected.
+    """
+    if not TASK_NAME_RE.match(name):
+        raise ConfigError(
+            f"invalid task name: {name!r}; task file names become unit and agent names, "
+            "so they must match [A-Za-z0-9][A-Za-z0-9._-]*",
+            path,
+        )
+
+
 def parse_task(data: Mapping[str, Any], path: Path, name: str) -> TaskSpec:
+    validate_task_name(name, path)
     check_unknown(data, TASK_KEYS, path, f"task {name}")
     check_schema_version(data, path, required=False)
     schedule_value = data.get("schedule")
@@ -428,8 +449,18 @@ def effective_randomized_delay(manifest: Manifest, task: TaskSpec) -> int:
 
 
 def effective_persistent(manifest: Manifest, task: TaskSpec) -> bool:
+    """Whether missed occurrences should be replayed.
+
+    Escape-hatch schedules count as calendar schedules here: both documented
+    forms — a systemd ``OnCalendar`` expression and a launchd
+    ``StartCalendarInterval`` list — are calendar-shaped, so silently dropping
+    ``Persistent=`` for them would make the escape hatch quietly weaker than
+    the grammar it exists to extend. An explicit ``persistent`` still wins.
+    """
     if task.persistent is not None:
         return task.persistent
     if manifest.defaults.persistent is not None:
         return manifest.defaults.persistent
-    return task.schedule is not None and task.schedule.is_calendar
+    if task.schedule is None:
+        return False
+    return task.schedule.is_calendar or task.schedule.kind == "raw"

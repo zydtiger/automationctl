@@ -34,19 +34,22 @@ def builtin_values(task: str, hostname: str, run_dir: str, now: datetime) -> dic
 
 
 def substitute(text: str, values: Mapping[str, str], *, where: str, strict: bool = True) -> str:
-    """Replace ``{name}`` placeholders; ``{{`` and ``}}`` are literal braces.
+    """Replace ``{name}`` placeholders.
 
-    Argv is expanded strictly: an unknown placeholder there is almost always a
-    typo that would silently change a command line. Prompt text is expanded
-    leniently, because prose legitimately contains braces.
+    Argv is expanded strictly: ``{{`` and ``}}`` are escapes for literal
+    braces, and an unknown placeholder is an error, because a typo there
+    silently changes a command line.
+
+    Prompt text is expanded leniently: known placeholders are substituted and
+    every other brace — doubled or not — is left exactly as written. A prompt
+    is prose, often containing JSON or code samples, and this tool has no
+    business rewriting an author's braces.
     """
 
     def replace(match: re.Match[str]) -> str:
         token = match.group(0)
-        if token == "{{":
-            return "{"
-        if token == "}}":
-            return "}"
+        if token in {"{{", "}}"}:
+            return token[0] if strict else token
         name = match.group(1)
         if name not in values:
             if not strict:

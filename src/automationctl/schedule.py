@@ -82,6 +82,8 @@ class Schedule:
     weekday: int | None = None
     day: int | None = None
     interval_seconds: int | None = None
+    #: The interval as written (``15m``, ``6h``), for backends that take units.
+    interval_text: str | None = None
     raw: Mapping[str, Any] = field(default_factory=dict)
 
     @property
@@ -172,8 +174,12 @@ def _parse_text(value: str) -> Schedule:
         if amount <= 0:
             raise ScheduleError(f"invalid interval: {tokens[1]!r}")
         seconds = amount * _UNIT_SECONDS[match.group(2)]
+        interval = f"{amount}{match.group(2)}"
         return Schedule(
-            text=f"every {amount}{match.group(2)}", kind="interval", interval_seconds=seconds
+            text=f"every {interval}",
+            kind="interval",
+            interval_seconds=seconds,
+            interval_text=interval,
         )
     raise ScheduleError(
         f"unknown schedule form: {value!r} "
@@ -214,7 +220,9 @@ def to_systemd(schedule: Schedule) -> SystemdTiming:
         )
     if schedule.kind == "interval":
         assert schedule.interval_seconds is not None
-        value = f"{schedule.interval_seconds}s"
+        # Emit the interval as the spec wrote it: systemd accepts `15m`, and a
+        # unit a human can read against the spec is worth more than seconds.
+        value = schedule.interval_text or f"{schedule.interval_seconds}s"
         return SystemdTiming(on_unit_active_sec=value, on_boot_sec=value)
     raw = schedule.raw.get("systemd")
     if raw is None:

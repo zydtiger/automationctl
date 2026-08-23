@@ -79,6 +79,21 @@ def test_prompt_content_is_not_rescanned_for_placeholders() -> None:
     assert invocation.argv == ("agent", "report {mystery}")
 
 
+def test_lenient_expansion_leaves_doubled_braces_verbatim() -> None:
+    """A prompt is prose; its braces belong to the author, not to this tool."""
+    assert (
+        substitute("{{literal}} and {task}", VALUES, where="x", strict=False)
+        == "{{literal}} and audit"
+    )
+
+
+def test_a_prompt_keeps_every_brace_it_was_written_with() -> None:
+    runner = Runner(name="argv", argv=("agent", "{prompt}"))
+    prompt = 'emit {{"ok": true}} for {task}'
+    invocation = build_invocation(task(runner="argv"), runner, prompt, VALUES)
+    assert invocation.argv == ("agent", 'emit {{"ok": true}} for audit')
+
+
 def test_command_task_cannot_use_the_prompt_placeholder() -> None:
     with pytest.raises(TemplateError, match="unknown placeholder"):
         build_invocation(task(command=("echo", "{prompt}")), None, None, VALUES)

@@ -12,6 +12,7 @@ them without this package.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import shutil
 from collections.abc import Mapping
@@ -69,11 +70,27 @@ def last_path(state_dir: Path, task: str) -> Path:
     return state_dir / "last" / f"{task}.json"
 
 
+def temp_name(path: Path) -> Path:
+    """Return a per-process, per-call temporary sibling of ``path``."""
+    return path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+
+
 def write_json(path: Path, data: Mapping[str, Any]) -> Path:
+    """Write JSON atomically.
+
+    The temporary name carries a pid and a random suffix. Two runs of the same
+    task can finish at the same moment — a timer firing while a manual run is
+    still going — and both rewrite ``last/<task>.json``; a shared temporary
+    name would let one truncate the other's file mid-write.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    tmp = temp_name(path)
+    try:
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
     return path
 
 

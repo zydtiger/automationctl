@@ -21,7 +21,7 @@ from .errors import AutomationctlError
 from .records import utcnow
 from .spec import TaskSpec
 from .template import build_invocation, builtin_values
-from .wrapper import DEFAULT_PATH
+from .wrapper import DEFAULT_PATH, build_env
 
 
 @dataclass(frozen=True)
@@ -35,10 +35,22 @@ class DoctorReport:
         return all(check.ok for check in self.checks)
 
 
-def effective_path(automations: Automations) -> str:
-    """Return the PATH the wrapper would build for this host."""
-    prepend = [str(paths.expand(item)) for item in automations.host_config.path_prepend]
-    return os.pathsep.join([*prepend, DEFAULT_PATH]) if prepend else DEFAULT_PATH
+def effective_path(automations: Automations, task: TaskSpec, env: Mapping[str, str]) -> str:
+    """Return the PATH this task's child would actually receive.
+
+    It has to come from the same builder the wrapper uses, because an env file
+    is allowed to set PATH — and if doctor guesses instead, it reports on an
+    environment no run will ever have.
+    """
+    probe = build_env(automations, task, env, Path("<doctor>"), strict=False)
+    return probe.get("PATH", DEFAULT_PATH)
+
+
+def _resolve(program: str, search_path: str) -> str | None:
+    """Resolve a program the way the wrapper will, absolute paths included."""
+    if os.sep in program:
+        return program if os.access(program, os.X_OK) else None
+    return shutil.which(program, path=search_path)
 
 
 def _programs(automations: Automations, task: TaskSpec) -> list[str]:
@@ -108,19 +120,19 @@ def run(
         )
     )
 
-    search_path = effective_path(automations)
     seen: set[str] = set()
     for task in tasks:
+        search_path = effective_path(automations, task, env)
         for program in _programs(automations, task):
             if program in seen:
                 continue
             seen.add(program)
-            found = program if os.sep in program else shutil.which(program, path=search_path)
+            found = _resolve(program, search_path)
             checks.append(
                 HealthCheck(
                     "binary",
                     found is not None,
-                    f"{program} -> {found}" if found else f"{program} not found on PATH",
+                    f"{program} -> {found}" if found else f"{program} not found or not executable",
                 )
             )
         if task.cwd:

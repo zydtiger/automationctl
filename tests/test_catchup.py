@@ -10,6 +10,7 @@ from conftest import Tree, local_tz
 
 from automationctl import records
 from automationctl.catchup import decide, plan
+from automationctl.spec import effective_persistent
 
 NOW = datetime(2026, 8, 23, 6, 0, tzinfo=UTC)
 
@@ -91,13 +92,26 @@ def test_interval_task_is_not_due_within_the_interval(tree: Tree) -> None:
     assert decision(tree, "hello") == (False, "interval has not elapsed")
 
 
-def test_custom_schedule_cannot_be_evaluated(tree: Tree) -> None:
+def test_custom_schedule_is_declined_with_an_explicit_reason(tree: Tree) -> None:
     tree.write_task(
         "hello",
-        'description = "d"\ncommand = ["true"]\npersistent = true\n\n'
+        'description = "d"\ncommand = ["true"]\n\n'
         '[schedule]\nsystemd = "Mon..Fri *-*-* 09:00:00"\n',
     )
-    assert decision(tree, "hello") == (False, "custom schedule cannot be evaluated")
+    due, reason = decision(tree, "hello")
+    assert due is False
+    assert "opaque to catch-up" in reason
+
+
+def test_custom_schedules_stay_persistent_by_default(tree: Tree) -> None:
+    """A raw calendar expression keeps missed-run replay; only catch-up declines."""
+    tree.write_task(
+        "hello",
+        'description = "d"\ncommand = ["true"]\n\n'
+        '[schedule]\nsystemd = "Mon..Fri *-*-* 09:00:00"\n',
+    )
+    automations = tree.load()
+    assert effective_persistent(automations.manifest, automations.tasks["hello"]) is True
 
 
 @pytest.mark.parametrize(

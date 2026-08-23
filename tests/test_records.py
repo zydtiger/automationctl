@@ -67,6 +67,20 @@ def test_prune_walks_every_recorded_task(tmp_path: Path) -> None:
     assert len(records.prune(tmp_path, keep_runs=0)) == 2
 
 
+def test_temp_names_are_unique_per_call(tmp_path: Path) -> None:
+    """Two runs of one task can rewrite last/<task>.json at the same moment."""
+    target = tmp_path / "last" / "audit.json"
+    names = {records.temp_name(target).name for _ in range(50)}
+    assert len(names) == 50
+    assert all(name.startswith("audit.json.") and name.endswith(".tmp") for name in names)
+
+
+def test_atomic_write_leaves_no_temp_file_behind(tmp_path: Path) -> None:
+    path = tmp_path / "nested" / "value.json"
+    records.write_json(path, {"a": 1})
+    assert [entry.name for entry in path.parent.iterdir()] == ["value.json"]
+
+
 def test_timestamps_round_trip() -> None:
     moment = datetime(2026, 8, 23, 3, 0, tzinfo=UTC)
     assert records.parse_isoformat(records.isoformat(moment)) == moment

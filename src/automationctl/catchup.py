@@ -46,9 +46,10 @@ def decide(
     task: TaskSpec,
     *,
     state_dir: Path,
-    now: datetime,
+    now: datetime | None = None,
 ) -> CatchupDecision:
     """Decide whether ``task`` should be run now to catch up a missed occurrence."""
+    now = now if now is not None else records.utcnow()
     if task.disabled:
         return CatchupDecision(task.name, False, "task is disabled")
     if task.schedule is None:
@@ -74,7 +75,12 @@ def decide(
         return CatchupDecision(task.name, False, "interval has not elapsed")
 
     if task.schedule.kind == "raw":
-        return CatchupDecision(task.name, False, "custom schedule cannot be evaluated")
+        return CatchupDecision(
+            task.name,
+            False,
+            "per-backend schedule table is opaque to catch-up; "
+            "the backend's own missed-run handling applies",
+        )
 
     occurrence = previous_occurrence(task.schedule, now)
     if occurrence is None:
@@ -97,7 +103,13 @@ def plan(
     state_dir: Path,
     now: datetime | None = None,
 ) -> list[CatchupDecision]:
-    """Decide catch-up for every task this host selects."""
+    """Decide catch-up for every task this host selects.
+
+    Decisions are evaluated against a single instant, and the caller runs the
+    due tasks serially in the foreground. Serial execution is deliberate: a
+    machine returning from a week offline should not start every missed agent
+    job at once, and named locks would turn most of them into skips anyway.
+    """
     moment = now if now is not None else records.utcnow()
     return [
         decide(automations, task, state_dir=state_dir, now=moment)

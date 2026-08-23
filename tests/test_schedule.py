@@ -93,8 +93,8 @@ def test_systemd_calendar_lowering(text: str, expected: str) -> None:
 
 def test_systemd_interval_lowering_sets_boot_and_active() -> None:
     timing = to_systemd(parse("every 15m"))
-    assert timing.on_unit_active_sec == "900s"
-    assert timing.on_boot_sec == "900s"
+    assert timing.on_unit_active_sec == "15m"
+    assert timing.on_boot_sec == "15m"
     assert timing.on_calendar == ()
 
 
