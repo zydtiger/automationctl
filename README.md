@@ -22,7 +22,7 @@ Task specs live in a separate configuration repository, conventionally
 `~/automations`. Copy [`examples/`](examples/) to get a working shape.
 
 ```bash
-uv tool install automationctl        # or: uv tool install git+<repo-url>
+uv tool install git+https://github.com/zydtiger/automationctl
 git clone <your-remote>/automations ~/automations
 
 automationctl doctor                 # read-only host probes: PATH, env, backend

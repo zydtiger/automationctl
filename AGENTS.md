@@ -55,10 +55,10 @@
 
 ## Publication and Releases
 
-- The repository is currently private and unpublished. The planned target is
-  public GitHub (`zydtiger/automationctl`) around the mac-parity milestone;
-  publication requires explicit approval and a self-containment audit at that
-  time.
+- The repository is public at `https://github.com/zydtiger/automationctl`
+  (base branch `main`). Every commit must stay self-contained: no personal
+  paths, host names, or private repository references; the pre-publication
+  audit standard keeps applying to all new content.
 - Version scheme is `0.x` under active development: breaking changes are
   expected. There are no releases or tags yet; the release contract is decided
-  together with the first publication approval.
+  before the first release tag.
