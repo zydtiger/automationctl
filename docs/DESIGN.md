@@ -543,9 +543,11 @@ committed marker — reviewable in the `automations` git history.
 | M3 ✅ | launchd backend + catch-up agent; backend interface solidified from two real implementations; `prune` | mac parity |
 | M4 (maybe never) | `watch_path` triggers, socket/webhook activation, pueue backend, cross-host record aggregation | only if a real need appears |
 
-M0–M3 are implemented. The launchd backend is rendered and reconciled by the
-same code path as systemd but has not yet been exercised on a real Mac; its
-control verbs are covered only by recorded-command tests.
+M0–M3 are implemented. The launchd backend has been exercised end to end on a
+real Mac (macOS 26): install with reconcile and garbage collection, scheduled
+firing, `submit`, `pause`/`resume`, the catch-up agent at load, and
+`uninstall` all behaved as designed against a live `gui` domain. The timezone
+trigger is the one piece still unverified on real hardware (§11.18).
 
 Sequencing notes: the backend interface is deliberately *not* abstracted in
 M2 — it is extracted in M3 when the second implementation exists. The private
