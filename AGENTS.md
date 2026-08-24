@@ -73,5 +73,12 @@
   paths, host names, or private repository references; the pre-publication
   audit standard keeps applying to all new content.
 - Version scheme is `0.x` under active development: breaking changes are
-  expected. There are no releases or tags yet; the release contract is decided
-  before the first release tag.
+  expected between releases.
+- Release contract: releases are annotated git tags named `vX.Y.Z` matching
+  the `pyproject.toml` version, each with a GitHub Release whose notes
+  summarize the changes and disclose known limitations. Nothing is published
+  to PyPI. Installation is `uv tool install
+  git+https://github.com/zydtiger/automationctl@vX.Y.Z`, or unpinned from
+  `main`. To release: bump the version in `pyproject.toml` on `main`,
+  validate, tag that commit, push the tag, and publish the GitHub Release
+  from it.
