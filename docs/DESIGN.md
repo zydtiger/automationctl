@@ -351,7 +351,7 @@ Description=automationctl: nightly-repo-audit
 [Service]
 Type=oneshot
 ExecStart=/home/user/.local/bin/automationctl exec --manifest /home/user/automations/manifest.toml nightly-repo-audit
-RuntimeMaxSec=3000                           # 45m task timeout + 5m backstop
+TimeoutStartSec=3000                         # 45m task timeout + backstop; RuntimeMaxSec is ignored on oneshot
 ```
 
 ```ini

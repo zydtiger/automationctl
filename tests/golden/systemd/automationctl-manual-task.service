@@ -6,4 +6,4 @@ Description=automationctl: manual-task
 [Service]
 Type=oneshot
 ExecStart=/opt/bin/automationctl exec --manifest /home/example/automations/manifest.toml manual-task
-RuntimeMaxSec=900
+TimeoutStartSec=900

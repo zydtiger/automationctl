@@ -6,4 +6,4 @@ Description=automationctl: raw-task
 [Service]
 Type=oneshot
 ExecStart=/opt/bin/automationctl exec --manifest /home/example/automations/manifest.toml raw-task
-RuntimeMaxSec=900
+TimeoutStartSec=900

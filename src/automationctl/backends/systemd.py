@@ -96,7 +96,9 @@ class SystemdBackend(Backend):
         ]
         timeout = effective_timeout(automations.manifest, task)
         if timeout is not None:
-            lines.append(f"RuntimeMaxSec={timeout + BACKSTOP_SECONDS}")
+            # systemd ignores RuntimeMaxSec= on Type=oneshot; TimeoutStartSec=,
+            # which defaults to infinity for oneshot, is what bounds ExecStart.
+            lines.append(f"TimeoutStartSec={timeout + BACKSTOP_SECONDS}")
         return "\n".join(lines) + "\n"
 
     def render_timer(self, automations: Automations, task: TaskSpec) -> str:
