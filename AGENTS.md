@@ -41,8 +41,9 @@
 
 ## Git
 
-- Base branch: `main`. No remote is configured; never create a remote or
-  publish without explicit approval.
+- Base branch: `main`, tracking `origin/main` on the public GitHub
+  repository. Never add another remote or change visibility without explicit
+  approval.
 - Small focused changes commit directly to `main`. Substantial or multi-commit
   work uses a short-lived `<prefix>/<task-name>` branch merged back to `main`.
 - Commit subjects: `prefix: concise imperative summary`, no trailing period,
