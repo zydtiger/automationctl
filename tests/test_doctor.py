@@ -134,6 +134,6 @@ def test_a_missing_env_file_is_reported(tree: Tree, tmp_path: Path) -> None:
         'tasks = ["hello"]\n'
         f'env_files = ["{tmp_path}/absent"]\n'
     )
-    tree.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    tree.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     report = probe(tree, tmp_path)
     assert any("missing or unreadable" in detail for detail in details(report, "env file"))

@@ -328,7 +328,7 @@ def test_activate_enables_before_bootstrap_so_install_restores_a_pause(
 def test_desired_files_never_lose_a_task_to_the_catchup_agent(tree: Tree, tmp_path: Path) -> None:
     """The reserved label must refuse, not quietly overwrite the task."""
     tree.write_manifest('schema_version = 1\n\n[hosts.testhost]\ntasks = ["catchup"]\n')
-    tree.write_task("catchup", 'description = "d"\ncommand = ["/bin/true"]\n')
+    tree.write_task("catchup", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     automations = tree.load()
     backend = make_backend(tree, tmp_path)
     with pytest.raises(BackendError, match="reserved"):

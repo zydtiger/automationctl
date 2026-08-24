@@ -33,7 +33,7 @@ tasks = ["hello"]
 
 [notify.hook]
 type = "command"
-command = ["/bin/true", "{task}", "{status}", "{exit_code}"]
+command = ["/usr/bin/true", "{task}", "{status}", "{exit_code}"]
 """
 
 
@@ -117,7 +117,7 @@ def test_notify_resolves_variables_from_env_files_not_the_ambient_environment(
     )
     tree.write_task(
         "hello",
-        'description = "d"\ncommand = ["/bin/false"]\non_failure = ["notify:ntfy"]\n',
+        'description = "d"\ncommand = ["/usr/bin/false"]\non_failure = ["notify:ntfy"]\n',
     )
     posted: list[tuple[str, bytes]] = []
 
@@ -146,7 +146,7 @@ def test_notify_still_fires_when_a_task_env_file_is_unreadable(tree: Tree, tmp_p
     )
     tree.write_task(
         "hello",
-        'description = "d"\ncommand = ["/bin/true"]\n'
+        'description = "d"\ncommand = ["/usr/bin/true"]\n'
         f'env_files = ["{tmp_path}/absent"]\n'
         'on_failure = ["notify:ntfy"]\n',
     )
@@ -203,7 +203,7 @@ def test_an_uppercase_scheme_is_a_valid_notify_url(tree: Tree, tmp_path: Path) -
     write_ntfy_tree(tree, tmp_path, "HTTPS://ntfy.example/alerts")
     tree.write_task(
         "hello",
-        'description = "d"\ncommand = ["/bin/false"]\non_failure = ["notify:ntfy"]\n',
+        'description = "d"\ncommand = ["/usr/bin/false"]\non_failure = ["notify:ntfy"]\n',
     )
     posted: list[str] = []
     result, _ = run_one(tree, tmp_path, notify_sender=lambda url, body, headers: posted.append(url))
@@ -243,7 +243,7 @@ def test_missing_env_file_fails_the_run(tree: Tree, tmp_path: Path) -> None:
         'tasks = ["hello"]\n'
         f'env_files = ["{tmp_path}/absent"]\n'
     )
-    tree.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    tree.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     result, _ = run_one(tree, tmp_path)
     assert result.status == records.STATUS_ERROR
     assert result.exit_code == 1
@@ -286,10 +286,10 @@ def test_meta_records_the_effective_manifest_defaults(tree: Tree, tmp_path: Path
         'tasks = ["hello"]\n\n'
         "[notify.hook]\n"
         'type = "command"\n'
-        'command = ["/bin/true"]\n'
+        'command = ["/usr/bin/true"]\n'
     )
     tree.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     result, _ = run_one(tree, tmp_path)
     meta = records.read_meta(result.run_dir)
@@ -306,14 +306,14 @@ def test_failing_command_is_recorded_and_notified(tree: Tree, tmp_path: Path) ->
     tree.write_manifest(NOTIFY_MANIFEST)
     tree.write_task(
         "hello",
-        'description = "d"\ncommand = ["/bin/false"]\non_failure = ["notify:hook"]\n',
+        'description = "d"\ncommand = ["/usr/bin/false"]\non_failure = ["notify:hook"]\n',
     )
     notify_runner = RecordingRunner()
     result, _ = run_one(tree, tmp_path, notify_runner=notify_runner)
 
     assert result.status == records.STATUS_FAILED
     assert result.exit_code == 1
-    assert notify_runner.calls == [("/bin/true", "hello", "failed", "1")]
+    assert notify_runner.calls == [("/usr/bin/true", "hello", "failed", "1")]
     meta = records.read_meta(result.run_dir)
     assert meta is not None
     assert meta["notifications"] == [
@@ -469,7 +469,7 @@ def test_missing_program_is_a_wrapper_error(tree: Tree, tmp_path: Path) -> None:
 def test_missing_cwd_is_a_wrapper_error(tree: Tree, tmp_path: Path) -> None:
     tree.write_task(
         "hello",
-        f'description = "d"\ncommand = ["/bin/true"]\ncwd = "{tmp_path}/absent"\n',
+        f'description = "d"\ncommand = ["/usr/bin/true"]\ncwd = "{tmp_path}/absent"\n',
     )
     result, _ = run_one(tree, tmp_path)
     assert result.status == records.STATUS_ERROR
@@ -479,7 +479,7 @@ def test_missing_cwd_is_a_wrapper_error(tree: Tree, tmp_path: Path) -> None:
 def test_jitter_sleeps_within_the_configured_delay(tree: Tree, tmp_path: Path) -> None:
     tree.write_task(
         "hello",
-        'description = "d"\ncommand = ["/bin/true"]\nrandomized_delay = "5m"\n',
+        'description = "d"\ncommand = ["/usr/bin/true"]\nrandomized_delay = "5m"\n',
     )
     slept: list[float] = []
     run_one(tree, tmp_path, jitter=True, sleeper=slept.append)
@@ -490,7 +490,7 @@ def test_jitter_sleeps_within_the_configured_delay(tree: Tree, tmp_path: Path) -
 def test_jitter_is_not_applied_without_the_flag(tree: Tree, tmp_path: Path) -> None:
     tree.write_task(
         "hello",
-        'description = "d"\ncommand = ["/bin/true"]\nrandomized_delay = "5m"\n',
+        'description = "d"\ncommand = ["/usr/bin/true"]\nrandomized_delay = "5m"\n',
     )
     slept: list[float] = []
     run_one(tree, tmp_path, sleeper=slept.append)

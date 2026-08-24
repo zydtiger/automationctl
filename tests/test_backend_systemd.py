@@ -206,7 +206,7 @@ def test_a_non_persistent_calendar_task_does_not_want_catchup_units(
 def test_desired_files_never_lose_a_task_to_the_catchup_units(tree: Tree, tmp_path: Path) -> None:
     """The reserved name must refuse, not quietly overwrite the task."""
     tree.write_manifest('schema_version = 1\n\n[hosts.testhost]\ntasks = ["catchup"]\n')
-    tree.write_task("catchup", 'description = "d"\ncommand = ["/bin/true"]\n')
+    tree.write_task("catchup", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     automations = tree.load()
     backend = SystemdBackend(
         unit_dir=tmp_path / "units",

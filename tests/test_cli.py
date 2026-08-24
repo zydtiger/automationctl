@@ -132,13 +132,13 @@ def test_run_propagates_a_failing_exit_code(cli: Tree) -> None:
 
 
 def test_exec_is_the_substrate_entrypoint(cli: Tree) -> None:
-    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     assert invoke(cli, "exec", "hello").exit_code == 0
     assert records.latest_run(cli.state, "hello") is not None
 
 
 def test_unknown_task_is_a_usage_error(cli: Tree) -> None:
-    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     result = invoke(cli, "run", "ghost")
     assert result.exit_code == 2
     assert "unknown task: ghost" in result.output
@@ -146,7 +146,7 @@ def test_unknown_task_is_a_usage_error(cli: Tree) -> None:
 
 def test_list_reports_schedule_and_last_outcome(cli: Tree) -> None:
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     invoke(cli, "run", "hello")
     result = invoke(cli, "list")
@@ -159,7 +159,7 @@ def test_install_dry_run_writes_nothing(
     cli: Tree, tmp_path: Path, recorder: RecordingRunner
 ) -> None:
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     result = invoke(cli, "install", "--dry-run", "--diff")
     assert result.exit_code == 0
@@ -174,7 +174,7 @@ def test_install_reconciles_and_enables(
 ) -> None:
     """The catch-up units are rendered and enabled alongside the task's own."""
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     assert invoke(cli, "install").exit_code == 0
     units = sorted(path.name for path in (tmp_path / "units").iterdir())
@@ -195,7 +195,9 @@ def test_install_renders_no_catchup_units_without_a_persistent_calendar_task(
     cli: Tree, tmp_path: Path, recorder: RecordingRunner
 ) -> None:
     """Triggers a host has nothing to use would only produce no-op sweeps."""
-    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "every 15m"\n')
+    cli.write_task(
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "every 15m"\n'
+    )
     assert invoke(cli, "install").exit_code == 0
     units = sorted(path.name for path in (tmp_path / "units").iterdir())
     assert units == ["automationctl-hello.service", "automationctl-hello.timer"]
@@ -207,12 +209,12 @@ def test_install_garbage_collects_catchup_units_a_host_stops_wanting(
 ) -> None:
     """They flow through the managed-prefix path like any other generated unit."""
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     invoke(cli, "install")
     assert (tmp_path / "units" / "automationctl-catchup.timer").exists()
 
-    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     assert invoke(cli, "install").exit_code == 0
     assert not (tmp_path / "units" / "automationctl-catchup.timer").exists()
     assert not (tmp_path / "units" / "automationctl-catchup.service").exists()
@@ -223,7 +225,7 @@ def test_uninstall_all_removes_the_catchup_units(
     cli: Tree, tmp_path: Path, recorder: RecordingRunner
 ) -> None:
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     invoke(cli, "install")
     assert invoke(cli, "uninstall", "--all").exit_code == 0
@@ -247,7 +249,7 @@ def test_install_garbage_collects_stale_units(
     unit_dir.mkdir()
     (unit_dir / "automationctl-old.timer").write_text("stale\n", encoding="utf-8")
     (unit_dir / "keep-me.service").write_text("mine\n", encoding="utf-8")
-    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     invoke(cli, "install")
     assert not (unit_dir / "automationctl-old.timer").exists()
     assert (unit_dir / "keep-me.service").exists()
@@ -259,7 +261,7 @@ def test_install_refuses_an_undeclared_host_and_removes_nothing(
 ) -> None:
     """A typo in --host must not garbage-collect the whole installation."""
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     invoke(cli, "install")
     installed = sorted(path.name for path in (tmp_path / "units").iterdir())
@@ -282,10 +284,10 @@ def test_install_gate_ignores_specs_belonging_to_another_host(
         "[hosts.otherhost]\n"
         'tasks = ["theirs"]\n'
     )
-    cli.write_task("mine", 'description = "d"\ncommand = ["/bin/true"]\n')
+    cli.write_task("mine", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     cli.write_task(
         "theirs",
-        'description = "d"\ncommand = ["/bin/true"]\n\n'
+        'description = "d"\ncommand = ["/usr/bin/true"]\n\n'
         "[schedule]\n"
         "launchd = [{ Weekday = 1, Hour = 9, Minute = 0 }]\n",
     )
@@ -300,7 +302,7 @@ def test_install_exits_non_zero_when_the_scheduler_refuses(
     cli: Tree, tmp_path: Path, failing_recorder: RecordingRunner
 ) -> None:
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     result = invoke(cli, "install")
     assert result.exit_code == 1
@@ -314,7 +316,7 @@ def test_install_does_not_claim_success_after_a_refused_command(
 ) -> None:
     """The last line a reader sees must not be a false 'installed'."""
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     result = invoke(cli, "install")
     assert result.exit_code == 1
@@ -327,7 +329,7 @@ def test_uninstall_all_is_permitted_for_an_undeclared_host(
 ) -> None:
     """Cleaning up a host the manifest no longer declares is what --all is for."""
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     invoke(cli, "install")
     assert list((tmp_path / "units").iterdir())
@@ -342,7 +344,7 @@ def test_task_verbs_exit_non_zero_when_the_scheduler_refuses(
     cli: Tree, failing_recorder: RecordingRunner, verb: str
 ) -> None:
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     assert invoke(cli, verb, "hello").exit_code == 1
 
@@ -353,14 +355,14 @@ def test_uninstall_exits_non_zero_when_the_scheduler_refuses(
     unit_dir = tmp_path / "units"
     unit_dir.mkdir()
     (unit_dir / "automationctl-hello.timer").write_text("stale\n", encoding="utf-8")
-    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     assert invoke(cli, "uninstall", "--all").exit_code == 1
 
 
 def test_follow_reports_a_missing_log_program_cleanly(
     cli: Tree, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
 
     def missing(argv: list[str]) -> int:
         raise FileNotFoundError(2, "No such file or directory", argv[0])
@@ -374,7 +376,7 @@ def test_follow_reports_a_missing_log_program_cleanly(
 
 def test_pause_and_resume_are_substrate_only(cli: Tree, recorder: RecordingRunner) -> None:
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     invoke(cli, "pause", "hello")
     invoke(cli, "resume", "hello")
@@ -385,7 +387,7 @@ def test_pause_and_resume_are_substrate_only(cli: Tree, recorder: RecordingRunne
 
 
 def test_submit_starts_the_service(cli: Tree, recorder: RecordingRunner) -> None:
-    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     assert invoke(cli, "submit", "hello").exit_code == 0
     assert recorder.transcript == ["systemctl --user start automationctl-hello.service"]
 
@@ -394,7 +396,7 @@ def test_uninstall_all_removes_managed_files(
     cli: Tree, tmp_path: Path, recorder: RecordingRunner
 ) -> None:
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     invoke(cli, "install")
     assert invoke(cli, "uninstall", "--all").exit_code == 0
@@ -402,7 +404,7 @@ def test_uninstall_all_removes_managed_files(
 
 
 def test_uninstall_requires_exactly_one_target(cli: Tree, recorder: RecordingRunner) -> None:
-    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     assert invoke(cli, "uninstall").exit_code == 2
 
 
@@ -417,7 +419,7 @@ def test_status_prints_the_catch_up_decision(cli: Tree) -> None:
     """A schedule catch-up cannot evaluate has to say so somewhere visible."""
     cli.write_task(
         "hello",
-        'description = "d"\ncommand = ["/bin/true"]\n\n'
+        'description = "d"\ncommand = ["/usr/bin/true"]\n\n'
         "[schedule]\n"
         'systemd = "Mon..Fri *-*-* 09:00:00"\n',
     )
@@ -429,7 +431,7 @@ def test_status_prints_the_catch_up_decision(cli: Tree) -> None:
 
 def test_catch_up_dry_run_reports_decisions(cli: Tree) -> None:
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     result = invoke(cli, "catch-up", "--dry-run")
     assert result.exit_code == 0
@@ -439,14 +441,14 @@ def test_catch_up_dry_run_reports_decisions(cli: Tree) -> None:
 
 def test_catch_up_runs_missed_tasks(cli: Tree) -> None:
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     assert invoke(cli, "catch-up").exit_code == 0
     assert records.latest_run(cli.state, "hello") is not None
 
 
 def test_prune_trims_run_records(cli: Tree) -> None:
-    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     for _ in range(3):
         invoke(cli, "run", "hello")
     assert runner.invoke(app, ["prune", "--keep-runs", "1"]).exit_code == 0
@@ -464,7 +466,7 @@ def test_doctor_reports_checks(cli: Tree, recorder: RecordingRunner) -> None:
 
 def test_doctor_reports_catch_up_trigger_coverage(cli: Tree, recorder: RecordingRunner) -> None:
     cli.write_task(
-        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
     )
     missing = invoke(cli, "doctor").output
     assert "FAIL catch-up triggers: automationctl-catchup.timer is missing" in missing
