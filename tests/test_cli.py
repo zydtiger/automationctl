@@ -14,6 +14,7 @@ from automationctl import backends, records
 from automationctl.backends import Backend
 from automationctl.cli import app
 from automationctl.commands import RecordingRunner
+from automationctl.locks import run_lock
 
 runner = CliRunner()
 
@@ -171,16 +172,63 @@ def test_install_dry_run_writes_nothing(
 def test_install_reconciles_and_enables(
     cli: Tree, tmp_path: Path, recorder: RecordingRunner
 ) -> None:
+    """The catch-up units are rendered and enabled alongside the task's own."""
     cli.write_task(
         "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
     )
     assert invoke(cli, "install").exit_code == 0
     units = sorted(path.name for path in (tmp_path / "units").iterdir())
-    assert units == ["automationctl-hello.service", "automationctl-hello.timer"]
+    assert units == [
+        "automationctl-catchup.service",
+        "automationctl-catchup.timer",
+        "automationctl-hello.service",
+        "automationctl-hello.timer",
+    ]
     assert recorder.transcript == [
         "systemctl --user daemon-reload",
         "systemctl --user enable --now automationctl-hello.timer",
+        "systemctl --user enable --now automationctl-catchup.timer",
     ]
+
+
+def test_install_renders_no_catchup_units_without_a_persistent_calendar_task(
+    cli: Tree, tmp_path: Path, recorder: RecordingRunner
+) -> None:
+    """Triggers a host has nothing to use would only produce no-op sweeps."""
+    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "every 15m"\n')
+    assert invoke(cli, "install").exit_code == 0
+    units = sorted(path.name for path in (tmp_path / "units").iterdir())
+    assert units == ["automationctl-hello.service", "automationctl-hello.timer"]
+    assert not any("catchup" in line for line in recorder.transcript)
+
+
+def test_install_garbage_collects_catchup_units_a_host_stops_wanting(
+    cli: Tree, tmp_path: Path, recorder: RecordingRunner
+) -> None:
+    """They flow through the managed-prefix path like any other generated unit."""
+    cli.write_task(
+        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+    )
+    invoke(cli, "install")
+    assert (tmp_path / "units" / "automationctl-catchup.timer").exists()
+
+    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/true"]\n')
+    assert invoke(cli, "install").exit_code == 0
+    assert not (tmp_path / "units" / "automationctl-catchup.timer").exists()
+    assert not (tmp_path / "units" / "automationctl-catchup.service").exists()
+    assert "systemctl --user disable --now automationctl-catchup.timer" in recorder.transcript
+
+
+def test_uninstall_all_removes_the_catchup_units(
+    cli: Tree, tmp_path: Path, recorder: RecordingRunner
+) -> None:
+    cli.write_task(
+        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+    )
+    invoke(cli, "install")
+    assert invoke(cli, "uninstall", "--all").exit_code == 0
+    assert list((tmp_path / "units").iterdir()) == []
+    assert "systemctl --user disable --now automationctl-catchup.timer" in recorder.transcript
 
 
 def test_install_refuses_a_repository_that_fails_lint(
@@ -215,7 +263,7 @@ def test_install_refuses_an_undeclared_host_and_removes_nothing(
     )
     invoke(cli, "install")
     installed = sorted(path.name for path in (tmp_path / "units").iterdir())
-    assert installed == ["automationctl-hello.service", "automationctl-hello.timer"]
+    assert "automationctl-hello.timer" in installed
 
     result = invoke_as(cli, "typohost", "install")
     assert result.exit_code != 0
@@ -412,3 +460,26 @@ def test_doctor_reports_checks(cli: Tree, recorder: RecordingRunner) -> None:
     assert "/bin/echo" in result.output
     for call in recorder.calls:
         assert call[0] in {"systemctl", "loginctl"}
+
+
+def test_doctor_reports_catch_up_trigger_coverage(cli: Tree, recorder: RecordingRunner) -> None:
+    cli.write_task(
+        "hello", 'description = "d"\ncommand = ["/bin/true"]\nschedule = "daily 03:00"\n'
+    )
+    missing = invoke(cli, "doctor").output
+    assert "FAIL catch-up triggers: automationctl-catchup.timer is missing" in missing
+
+    invoke(cli, "install")
+    assert "ok   catch-up triggers: automationctl-catchup.timer installed" in (
+        invoke(cli, "doctor").output
+    )
+
+
+def test_run_reports_the_skip_reason(cli: Tree) -> None:
+    """The implicit lock makes skips routine, so a silent no-op is not enough."""
+    cli.write_task("hello", 'description = "d"\ncommand = ["/bin/echo", "hi"]\n')
+    with run_lock(cli.state / "locks", "hello"):
+        result = invoke(cli, "run", "hello")
+    assert result.exit_code == 0
+    assert "skipped" in result.output
+    assert "already running" in result.output

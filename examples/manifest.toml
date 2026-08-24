@@ -11,6 +11,12 @@ timeout = "30m"
 on_failure = ["notify:ntfy"]
 randomized_delay = "5m"
 
+# macOS only, and off unless set. The generated catch-up agent already runs at
+# load and watches /etc/localtime for timezone changes, but launchd exposes no
+# event for a clock step; this interval bounds how long a stepped clock can
+# hide a missed occurrence. Linux detects both events exactly and ignores it.
+# catchup_sweep = "6h"
+
 [hosts.workstation]
 tasks = [
   "canary",

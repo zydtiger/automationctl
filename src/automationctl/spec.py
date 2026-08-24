@@ -46,7 +46,9 @@ TASK_KEYS = frozenset(
     }
 )
 MANIFEST_KEYS = frozenset({"schema_version", "defaults", "hosts", "notify", "lint"})
-DEFAULTS_KEYS = frozenset({"timeout", "on_failure", "randomized_delay", "persistent"})
+DEFAULTS_KEYS = frozenset(
+    {"timeout", "on_failure", "randomized_delay", "persistent", "catchup_sweep"}
+)
 HOST_KEYS = frozenset({"tasks", "path_prepend", "env_files"})
 NOTIFY_KEYS = frozenset({"type", "url_env", "command", "title"})
 LINT_KEYS = frozenset({"forbidden_argv"})
@@ -193,12 +195,15 @@ class HostConfig:
 
 @dataclass(frozen=True)
 class Defaults:
-    """Manifest-wide fallbacks for task fields."""
+    """Manifest-wide fallbacks for task fields, plus host-wide knobs."""
 
     timeout_seconds: int | None = None
     on_failure: tuple[str, ...] = ()
     randomized_delay_seconds: int | None = None
     persistent: bool | None = None
+    #: Interval for the launchd catch-up sweep; ``None`` leaves it off. It is
+    #: not a task field: it configures the one generated catch-up agent.
+    catchup_sweep_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -280,11 +285,17 @@ def parse_manifest(data: Mapping[str, Any], path: Path) -> Manifest:
     if not isinstance(defaults_table, Mapping):
         raise ConfigError("[defaults] must be a table", path)
     check_unknown(defaults_table, DEFAULTS_KEYS, path, "[defaults]")
+    sweep = opt_duration(defaults_table, "catchup_sweep", path)
+    if sweep is not None and sweep <= 0:
+        # launchd rejects a non-positive StartInterval, and "off" is spelled by
+        # leaving the knob out rather than by asking for a zero-length period.
+        raise ConfigError("[defaults]: catchup_sweep must be a positive duration", path)
     defaults = Defaults(
         timeout_seconds=opt_duration(defaults_table, "timeout", path),
         on_failure=opt_str_tuple(defaults_table, "on_failure", path) or (),
         randomized_delay_seconds=opt_duration(defaults_table, "randomized_delay", path),
         persistent=opt_bool(defaults_table, "persistent", path),
+        catchup_sweep_seconds=sweep,
     )
 
     hosts_table = data.get("hosts", {})

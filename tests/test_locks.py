@@ -1,4 +1,4 @@
-"""Named fcntl locks."""
+"""Named and implicit fcntl locks."""
 
 from __future__ import annotations
 
@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
+from automationctl import locks, spec
 from automationctl.errors import AutomationctlError, LockBusy
-from automationctl.locks import named_lock
+from automationctl.locks import named_lock, run_lock
 
 
 def test_lock_is_created_and_released(tmp_path: Path) -> None:
@@ -32,3 +33,26 @@ def test_distinct_names_do_not_contend(tmp_path: Path) -> None:
 def test_invalid_lock_names_are_rejected(tmp_path: Path, name: str) -> None:
     with pytest.raises(AutomationctlError), named_lock(tmp_path, name):
         pass
+
+
+def test_a_run_lock_lives_in_its_own_namespace(tmp_path: Path) -> None:
+    """A named lock and a run lock spelled the same are different locks."""
+    with run_lock(tmp_path, "gpu") as path:
+        assert path == tmp_path / "tasks" / "gpu.lock"
+        with named_lock(tmp_path, "gpu"):
+            pass
+
+
+def test_a_contended_run_lock_names_the_task(tmp_path: Path) -> None:
+    with (
+        run_lock(tmp_path, "audit"),
+        pytest.raises(LockBusy, match="already running"),
+        run_lock(tmp_path, "audit"),
+    ):
+        pass
+
+
+def test_task_names_are_always_valid_lock_names() -> None:
+    """Every exec derives a run-lock path from the task name, so the two name
+    grammars must not drift apart."""
+    assert spec.TASK_NAME_RE.pattern == locks._NAME_RE.pattern

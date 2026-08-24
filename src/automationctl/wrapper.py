@@ -28,7 +28,7 @@ from . import paths, records
 from .commands import CommandRunner
 from .config import Automations, load_prompt
 from .errors import AutomationctlError, ConfigError, LockBusy
-from .locks import named_lock
+from .locks import named_lock, run_lock
 from .notify import HttpSender, NotifyEvent, NotifyOutcome, dispatch, transport_name
 from .records import (
     STATUS_ERROR,
@@ -228,12 +228,22 @@ def _pump(source: IO[bytes], sink: Path, passthrough: TextIO) -> None:
 
 
 @contextmanager
-def _maybe_lock(state_dir: Path, name: str | None) -> Iterator[None]:
-    if name is None:
-        yield
-        return
-    with named_lock(state_dir / "locks", name):
-        yield
+def _run_locks(state_dir: Path, task: TaskSpec) -> Iterator[None]:
+    """Hold the implicit run lock, and the named lock when the spec declares one.
+
+    The run lock spans the whole exec lifecycle and is what makes two triggers
+    that genuinely overlap in time — a ``Persistent=`` replay racing a boot
+    catch-up while a long agent task is still going — produce one run and one
+    skip. The named lock is a separate concern: it excludes *other* tasks
+    sharing a resource, and a task that declares none still may not run twice
+    at once.
+    """
+    with run_lock(state_dir / "locks", task.name):
+        if task.lock is None:
+            yield
+            return
+        with named_lock(state_dir / "locks", task.lock):
+            yield
 
 
 def _terminate(process: subprocess.Popen[bytes], grace: float) -> None:
@@ -484,7 +494,7 @@ def exec_task(automations: Automations, task: TaskSpec, options: ExecOptions) ->
         options.sleeper(waited)
 
     try:
-        with _maybe_lock(options.state_dir, task.lock):
+        with _run_locks(options.state_dir, task):
             return _execute(automations, task, options, meta, run_dir, run_id, started)
     except LockBusy as exc:
         return _finalize(

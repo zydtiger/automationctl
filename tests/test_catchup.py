@@ -9,7 +9,7 @@ import pytest
 from conftest import Tree, local_tz
 
 from automationctl import records
-from automationctl.catchup import decide, plan
+from automationctl.catchup import decide, plan, triggers_wanted
 from automationctl.spec import effective_persistent
 
 NOW = datetime(2026, 8, 23, 6, 0, tzinfo=UTC)
@@ -48,6 +48,46 @@ def test_run_before_the_last_occurrence_is_due(tree: Tree) -> None:
 def test_run_after_the_last_occurrence_is_not_due(tree: Tree) -> None:
     tree.write_task("hello", 'description = "d"\ncommand = ["true"]\nschedule = "daily 03:00"\n')
     set_last(tree, "hello", "2026-08-23T03:00:04Z")
+    assert decision(tree, "hello") == (False, "last run covers the latest occurrence")
+
+
+def test_a_skipped_record_never_satisfies_an_occurrence(tree: Tree) -> None:
+    """A skip is an occurrence that did not run, however recent its record is."""
+    tree.write_task("hello", 'description = "d"\ncommand = ["true"]\nschedule = "daily 03:00"\n')
+    records.write_last(
+        tree.state,
+        "hello",
+        {"task": "hello", "status": "skipped", "started_at": "2026-08-23T03:00:04Z"},
+    )
+    due, reason = decision(tree, "hello")
+    assert due
+    assert "skipped" in reason
+
+
+def test_a_skipped_record_does_not_satisfy_an_interval_either(tree: Tree) -> None:
+    tree.write_task(
+        "hello",
+        'description = "d"\ncommand = ["true"]\nschedule = "every 15m"\npersistent = true\n',
+    )
+    records.write_last(
+        tree.state,
+        "hello",
+        {"task": "hello", "status": "skipped", "started_at": "2026-08-23T05:55:00Z"},
+    )
+    due, reason = decision(tree, "hello")
+    assert due
+    assert "skipped" in reason
+
+
+@pytest.mark.parametrize("status", ["ok", "failed", "timeout", "error"])
+def test_every_other_status_still_covers_the_occurrence(tree: Tree, status: str) -> None:
+    """Only a skip means the occurrence never ran; a failure is a run that failed."""
+    tree.write_task("hello", 'description = "d"\ncommand = ["true"]\nschedule = "daily 03:00"\n')
+    records.write_last(
+        tree.state,
+        "hello",
+        {"task": "hello", "status": status, "started_at": "2026-08-23T03:00:04Z"},
+    )
     assert decision(tree, "hello") == (False, "last run covers the latest occurrence")
 
 
@@ -171,6 +211,32 @@ def test_catchup_decisions_follow_the_local_wall_clock(
     assert result.due is due, why
 
 
+@pytest.mark.parametrize(
+    ("spec", "wanted", "why"),
+    [
+        ('schedule = "daily 03:00"\n', True, "a wall-clock time can be jumped past"),
+        ('schedule = "every 15m"\n', False, "elapsed time has no calendar"),
+        ("", False, "a manual task has no occurrence to miss"),
+        (
+            'schedule = "daily 03:00"\npersistent = false\n',
+            False,
+            "a missed occurrence is deliberately not replayed",
+        ),
+        (
+            '[schedule]\nsystemd = "Mon..Fri *-*-* 09:00:00"\n',
+            False,
+            "catch-up declines a raw schedule however it is woken",
+        ),
+    ],
+)
+def test_only_a_persistent_calendar_task_wants_triggers(
+    tree: Tree, spec: str, wanted: bool, why: str
+) -> None:
+    tree.write_task("hello", f'description = "d"\ncommand = ["true"]\n{spec}')
+    automations = tree.load()
+    assert triggers_wanted(automations, automations.enabled_tasks()) is wanted, why
+
+
 def test_plan_covers_every_selected_task(tree: Tree) -> None:
     tree.write_manifest('schema_version = 1\n\n[hosts.testhost]\ntasks = ["hello", "other"]\n')
     tree.write_task("hello", 'description = "d"\ncommand = ["true"]\nschedule = "daily 03:00"\n')
@@ -179,3 +245,17 @@ def test_plan_covers_every_selected_task(tree: Tree) -> None:
     decisions = plan(tree.load(), state_dir=tree.state, now=NOW)
     assert [item.task for item in decisions] == ["hello", "other"]
     assert [item.due for item in decisions] == [True, False]
+
+
+def test_an_interval_task_can_be_due_while_triggers_are_not_wanted(tree: Tree) -> None:
+    """The render predicate is deliberately narrower than ``decide`` (§11.18):
+    an interval task can be due, but its timer self-recovers, so no catch-up
+    triggers are rendered for it."""
+    tree.write_task(
+        "hello",
+        'description = "d"\ncommand = ["true"]\nschedule = "every 15m"\npersistent = true\n',
+    )
+    automations = tree.load()
+    tasks = automations.enabled_tasks()
+    assert triggers_wanted(automations, tasks) is False
+    assert decide(automations, tasks[0], state_dir=tree.state, now=NOW).due is True

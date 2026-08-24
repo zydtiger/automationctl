@@ -43,6 +43,27 @@ def test_manifest_round_trip() -> None:
     assert manifest.lint.forbidden_argv == ("--danger",)
 
 
+def test_catchup_sweep_accepts_a_duration() -> None:
+    manifest = parse_manifest({"schema_version": 1, "defaults": {"catchup_sweep": "6h"}}, FAKE)
+    assert manifest.defaults.catchup_sweep_seconds == 21600
+
+
+def test_catchup_sweep_defaults_to_off() -> None:
+    assert parse_manifest({"schema_version": 1}, FAKE).defaults.catchup_sweep_seconds is None
+
+
+@pytest.mark.parametrize("value", ["soon", "6", 6, "-1h"])
+def test_catchup_sweep_rejects_garbage(value: object) -> None:
+    with pytest.raises(ConfigError):
+        parse_manifest({"schema_version": 1, "defaults": {"catchup_sweep": value}}, FAKE)
+
+
+def test_catchup_sweep_rejects_a_zero_length_period() -> None:
+    """launchd rejects a non-positive StartInterval; "off" is spelled by omission."""
+    with pytest.raises(ConfigError, match="must be a positive duration"):
+        parse_manifest({"schema_version": 1, "defaults": {"catchup_sweep": "0s"}}, FAKE)
+
+
 def test_manifest_requires_schema_version() -> None:
     with pytest.raises(ConfigError, match="schema_version"):
         parse_manifest({}, FAKE)

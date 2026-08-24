@@ -8,9 +8,16 @@ import pytest
 from conftest import FIXED_EXECUTABLE, FIXED_MANIFEST, Tree
 
 from automationctl.backends import CREATE, DELETE, UNCHANGED, UPDATE
-from automationctl.backends.systemd import SystemdBackend
+from automationctl.backends.systemd import (
+    CATCHUP_BOOT_SEC,
+    CATCHUP_SERVICE,
+    CATCHUP_TIMER,
+    CLOCK_TRIGGER_MIN_VERSION,
+    SystemdBackend,
+)
 from automationctl.commands import CommandResult, RecordingRunner
 from automationctl.config import Automations
+from automationctl.errors import BackendError
 
 GOLDEN = Path(__file__).parent / "golden" / "systemd"
 
@@ -135,6 +142,105 @@ def test_interval_timers_use_the_documented_unit_form(
     assert "OnBootSec=15m" in timer
 
 
+def test_catchup_units_carry_the_clock_and_boot_triggers(
+    rendered: tuple[SystemdBackend, Automations, dict[str, str]],
+) -> None:
+    """A jumped-past occurrence is only recoverable if something wakes catch-up."""
+    _, _, files = rendered
+    timer = files[CATCHUP_TIMER]
+    assert "OnTimezoneChange=true" in timer
+    assert "OnClockChange=true" in timer
+    assert f"OnBootSec={CATCHUP_BOOT_SEC}" in timer
+    assert "OnCalendar" not in timer
+    service = files[CATCHUP_SERVICE]
+    assert "ExecStart=/opt/bin/automationctl catch-up --manifest" in service
+    # Catch-up runs every missed task serially, so no invented aggregate bound.
+    assert "TimeoutStartSec" not in service
+
+
+def test_a_host_with_nothing_to_catch_up_renders_no_catchup_units(
+    tree: Tree, tmp_path: Path
+) -> None:
+    """Interval and escape-hatch schedules give the triggers nothing to recover."""
+    tree.write_manifest(
+        "schema_version = 1\n\n[hosts.testhost]\n"
+        'tasks = ["interval-task", "manual-task", "raw-task"]\n'
+    )
+    for name in ("interval-task", "manual-task", "raw-task"):
+        tree.write_task(name, TASKS[name])
+    automations = tree.load()
+    backend = SystemdBackend(
+        unit_dir=tmp_path / "units",
+        runner=RecordingRunner(),
+        executable=FIXED_EXECUTABLE,
+        manifest_path=FIXED_MANIFEST,
+        state_dir=tree.state,
+        uid=1000,
+    )
+    files = backend.desired_files(automations, automations.enabled_tasks())
+    assert CATCHUP_SERVICE not in files
+    assert CATCHUP_TIMER not in files
+    backend.activate(automations, automations.enabled_tasks(), files)
+    runner = backend.runner
+    assert isinstance(runner, RecordingRunner)
+    assert not any(CATCHUP_TIMER in line for line in runner.transcript)
+
+
+def test_a_non_persistent_calendar_task_does_not_want_catchup_units(
+    tree: Tree, tmp_path: Path
+) -> None:
+    tree.write_manifest('schema_version = 1\n\n[hosts.testhost]\ntasks = ["weekly-task"]\n')
+    tree.write_task("weekly-task", TASKS["weekly-task"])
+    automations = tree.load()
+    backend = SystemdBackend(
+        unit_dir=tmp_path / "units",
+        runner=RecordingRunner(),
+        executable=FIXED_EXECUTABLE,
+        manifest_path=FIXED_MANIFEST,
+        state_dir=tree.state,
+        uid=1000,
+    )
+    assert CATCHUP_TIMER not in backend.desired_files(automations, automations.enabled_tasks())
+
+
+def test_desired_files_never_lose_a_task_to_the_catchup_units(tree: Tree, tmp_path: Path) -> None:
+    """The reserved name must refuse, not quietly overwrite the task."""
+    tree.write_manifest('schema_version = 1\n\n[hosts.testhost]\ntasks = ["catchup"]\n')
+    tree.write_task("catchup", 'description = "d"\ncommand = ["/bin/true"]\n')
+    automations = tree.load()
+    backend = SystemdBackend(
+        unit_dir=tmp_path / "units",
+        runner=RecordingRunner(),
+        executable=FIXED_EXECUTABLE,
+        manifest_path=FIXED_MANIFEST,
+        state_dir=tree.state,
+        uid=1000,
+    )
+    with pytest.raises(BackendError, match="reserved"):
+        backend.desired_files(automations, automations.enabled_tasks())
+
+
+def test_catchup_units_are_garbage_collected_like_any_other(
+    rendered: tuple[SystemdBackend, Automations, dict[str, str]],
+) -> None:
+    """When no task wants them any more they are stale units, not orphans."""
+    backend, _, files = rendered
+    backend.unit_dir.mkdir(parents=True)
+    backend.apply(backend.plan(files), files)
+    assert (backend.unit_dir / CATCHUP_TIMER).exists()
+
+    backend.runner = RecordingRunner()
+    empty = backend.plan({})
+    actions = {change.path.name: change.action for change in empty.changes}
+    assert actions[CATCHUP_SERVICE] == DELETE
+    assert actions[CATCHUP_TIMER] == DELETE
+    backend.apply(empty, {})
+    runner = backend.runner
+    assert isinstance(runner, RecordingRunner)
+    assert f"systemctl --user disable --now {CATCHUP_TIMER}" in runner.transcript
+    assert not (backend.unit_dir / CATCHUP_SERVICE).exists()
+
+
 def test_plan_creates_updates_deletes_and_leaves_alone(
     rendered: tuple[SystemdBackend, Automations, dict[str, str]],
 ) -> None:
@@ -173,7 +279,7 @@ def test_apply_writes_desired_and_removes_stale(
     assert "systemctl --user disable --now automationctl-gone.timer" in runner.transcript
 
 
-def test_activate_enables_only_scheduled_timers(
+def test_activate_enables_scheduled_timers_and_the_catchup_timer(
     rendered: tuple[SystemdBackend, Automations, dict[str, str]],
 ) -> None:
     backend, automations, _ = rendered
@@ -185,6 +291,7 @@ def test_activate_enables_only_scheduled_timers(
         "systemctl --user enable --now automationctl-interval-task.timer",
         "systemctl --user enable --now automationctl-weekly-task.timer",
         "systemctl --user enable --now automationctl-raw-task.timer",
+        "systemctl --user enable --now automationctl-catchup.timer",
     ]
 
 
@@ -238,6 +345,89 @@ def test_follow_argv_targets_journald(
     )
 
 
+def version_response(text: str) -> dict[tuple[str, ...], CommandResult]:
+    """Canned ``systemctl --version`` output, through the command seam."""
+    argv: tuple[str, ...] = ("systemctl", "--user", "--version")
+    return {argv: CommandResult(argv, 0, stdout=text)}
+
+
+def catchup_checks(
+    rendered: tuple[SystemdBackend, Automations, dict[str, str]],
+) -> dict[str, tuple[bool, str]]:
+    backend, automations, _ = rendered
+    return {
+        check.name: (check.ok, check.detail)
+        for check in backend.catchup_health(automations, automations.enabled_tasks())
+    }
+
+
+def test_doctor_reports_missing_catchup_triggers(
+    rendered: tuple[SystemdBackend, Automations, dict[str, str]],
+) -> None:
+    backend, _, _ = rendered
+    backend.runner = RecordingRunner(responses=version_response("systemd 257 (257.5-1)\n"))
+    checks = catchup_checks(rendered)
+    assert checks["catch-up triggers"][0] is False
+    assert "is missing" in checks["catch-up triggers"][1]
+
+
+def test_doctor_reports_installed_catchup_triggers(
+    rendered: tuple[SystemdBackend, Automations, dict[str, str]],
+) -> None:
+    backend, _, files = rendered
+    backend.unit_dir.mkdir(parents=True)
+    backend.apply(backend.plan(files), files)
+    backend.runner = RecordingRunner(responses=version_response("systemd 257 (257.5-1)\n"))
+    checks = catchup_checks(rendered)
+    assert checks["catch-up triggers"][0] is True
+    assert checks["clock triggers"] == (True, "systemd 257 supports OnTimezoneChange=")
+
+
+def test_doctor_reports_a_systemd_too_old_for_timezone_triggers(
+    rendered: tuple[SystemdBackend, Automations, dict[str, str]],
+) -> None:
+    """Below 242 the directive is ignored and only the boot backstop ever fires."""
+    backend, _, _ = rendered
+    old = CLOCK_TRIGGER_MIN_VERSION - 1
+    backend.runner = RecordingRunner(responses=version_response(f"systemd {old} ({old}-1)\n"))
+    ok, detail = catchup_checks(rendered)["clock triggers"]
+    assert ok is False
+    assert f"systemd {old} predates OnTimezoneChange=" in detail
+
+
+def test_doctor_treats_an_unreadable_systemd_version_as_a_failure(
+    rendered: tuple[SystemdBackend, Automations, dict[str, str]],
+) -> None:
+    """An unanswerable probe is not a pass for a trigger that fails silently."""
+    backend, _, _ = rendered
+    backend.runner = RecordingRunner(responses=version_response("who knows\n"))
+    ok, detail = catchup_checks(rendered)["clock triggers"]
+    assert ok is False
+    assert "cannot determine the systemd version" in detail
+
+
+def test_a_host_with_nothing_to_catch_up_reports_no_missing_trigger(
+    tree: Tree, tmp_path: Path
+) -> None:
+    tree.write_manifest('schema_version = 1\n\n[hosts.testhost]\ntasks = ["manual-task"]\n')
+    tree.write_task("manual-task", TASKS["manual-task"])
+    automations = tree.load()
+    runner = RecordingRunner()
+    backend = SystemdBackend(
+        unit_dir=tmp_path / "units",
+        runner=runner,
+        executable=FIXED_EXECUTABLE,
+        manifest_path=FIXED_MANIFEST,
+        state_dir=tree.state,
+        uid=1000,
+    )
+    checks = backend.catchup_health(automations, automations.enabled_tasks())
+    assert [(check.name, check.ok) for check in checks] == [("catch-up triggers", True)]
+    assert "not needed" in checks[0].detail
+    # Nothing to probe means no probe: the version question does not arise.
+    assert runner.calls == []
+
+
 def test_health_probes_are_read_only(
     rendered: tuple[SystemdBackend, Automations, dict[str, str]],
 ) -> None:
@@ -249,3 +439,21 @@ def test_health_probes_are_read_only(
     for call in runner.calls:
         assert call[0] in {"systemctl", "loginctl"}
         assert not ({"start", "stop", "enable", "disable", "daemon-reload"} & set(call))
+
+
+def test_doctor_reports_a_stale_catchup_timer(
+    rendered: tuple[SystemdBackend, Automations, dict[str, str]],
+) -> None:
+    """Units left by an older tool version must not read as ok until reinstalled."""
+    backend, _, files = rendered
+    backend.unit_dir.mkdir(parents=True)
+    backend.apply(backend.plan(files), files)
+    timer = backend.unit_dir / CATCHUP_TIMER
+    timer.write_text(
+        timer.read_text(encoding="utf-8").replace("OnTimezoneChange=true\n", ""),
+        encoding="utf-8",
+    )
+    backend.runner = RecordingRunner(responses=version_response("systemd 257 (257.5-1)\n"))
+    checks = catchup_checks(rendered)
+    assert checks["catch-up triggers"][0] is False
+    assert "stale" in checks["catch-up triggers"][1]

@@ -9,12 +9,15 @@ touched and stale generated units are garbage-collected.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 
+from .. import catchup
 from ..commands import CommandResult, CommandRunner
 from ..config import Automations
+from ..errors import BackendError
 from ..schedule import to_systemd
 from ..spec import (
     TaskSpec,
@@ -29,6 +32,24 @@ SERVICE_SUFFIX = ".service"
 TIMER_SUFFIX = ".timer"
 BACKSTOP_SECONDS = 300
 SYSTEMCTL = "systemctl"
+
+CATCHUP_NAME = "catchup"
+CATCHUP_SERVICE = f"{UNIT_PREFIX}{CATCHUP_NAME}{SERVICE_SUFFIX}"
+CATCHUP_TIMER = f"{UNIT_PREFIX}{CATCHUP_NAME}{TIMER_SUFFIX}"
+
+#: Boot backstop for the catch-up timer. The event triggers cover a running
+#: system; this covers the occurrences missed while it was off, and waits long
+#: enough that a task starting at boot finds the session it expects.
+CATCHUP_BOOT_SEC = "2m"
+
+#: ``OnClockChange=`` and ``OnTimezoneChange=`` were both added in systemd 242
+#: ("Added in version 242." in systemd.timer(5)). An older manager parses the
+#: unit, warns about the unknown directives, and runs a timer that fires only
+#: on the boot backstop — which is precisely the silent gap doctor exists to
+#: surface, so the probe compares against the version that actually has them.
+CLOCK_TRIGGER_MIN_VERSION = 242
+
+_VERSION_RE = re.compile(r"systemd\s+(\d+)")
 
 
 def _quote(value: str) -> str:
@@ -127,12 +148,67 @@ class SystemdBackend(Backend):
         lines.extend(["", "[Install]", "WantedBy=timers.target"])
         return "\n".join(lines) + "\n"
 
+    def render_catchup_service(self) -> str:
+        # No TimeoutStartSec=. Catch-up runs every missed task serially in one
+        # foreground sweep, so its runtime is the sum of runs each of which the
+        # wrapper already bounds by its own timeout; any single number here
+        # would be an invented aggregate whose failure mode is systemd killing
+        # the sweep mid-task and losing the very occurrence it was recovering.
+        # Type=oneshot already defaults TimeoutStartSec= to infinity.
+        return (
+            "\n".join(
+                [
+                    f"# {GENERATED_HEADER}",
+                    "",
+                    "[Unit]",
+                    "Description=automationctl: catch up missed occurrences",
+                    "",
+                    "[Service]",
+                    "Type=oneshot",
+                    f"ExecStart={' '.join(_quote(item) for item in self.catchup_argv())}",
+                ]
+            )
+            + "\n"
+        )
+
+    def render_catchup_timer(self) -> str:
+        return (
+            "\n".join(
+                [
+                    f"# {GENERATED_HEADER}",
+                    "",
+                    "[Unit]",
+                    "Description=automationctl timer: catch up missed occurrences",
+                    "",
+                    "[Timer]",
+                    f"Unit={CATCHUP_SERVICE}",
+                    f"OnBootSec={CATCHUP_BOOT_SEC}",
+                    "OnClockChange=true",
+                    "OnTimezoneChange=true",
+                    "",
+                    "[Install]",
+                    "WantedBy=timers.target",
+                ]
+            )
+            + "\n"
+        )
+
     def desired_files(self, automations: Automations, tasks: Sequence[TaskSpec]) -> dict[str, str]:
         files: dict[str, str] = {}
         for task in tasks:
-            files[service_name(task.name)] = self.render_service(automations, task)
+            names = (service_name(task.name), timer_name(task.name))
+            if CATCHUP_SERVICE in names or CATCHUP_TIMER in names:
+                # lint reserves the name; refuse rather than silently drop the
+                # task by overwriting it with the catch-up units below.
+                raise BackendError(
+                    f"task {task.name!r} collides with the reserved {CATCHUP_NAME} units"
+                )
+            files[names[0]] = self.render_service(automations, task)
             if task.schedule is not None:
-                files[timer_name(task.name)] = self.render_timer(automations, task)
+                files[names[1]] = self.render_timer(automations, task)
+        if catchup.triggers_wanted(automations, tasks):
+            files[CATCHUP_SERVICE] = self.render_catchup_service()
+            files[CATCHUP_TIMER] = self.render_catchup_timer()
         return files
 
     # -- substrate operations ---------------------------------------------
@@ -163,6 +239,11 @@ class SystemdBackend(Backend):
             if task.schedule is None:
                 continue
             results.append(self._systemctl("enable", "--now", timer_name(task.name)))
+        # Recomputed from the same predicate that rendered it rather than read
+        # out of ``desired``: render and activation must agree, and they cannot
+        # disagree if they answer one question with one function.
+        if catchup.triggers_wanted(automations, tasks):
+            results.append(self._systemctl("enable", "--now", CATCHUP_TIMER))
         return results
 
     def deactivate(self, filenames: Sequence[str]) -> list[CommandResult]:
@@ -218,6 +299,68 @@ class SystemdBackend(Backend):
                 "linger",
                 value == "yes",
                 "enabled" if value == "yes" else f"not enabled ({value or 'unknown'})",
+            )
+        )
+        return checks
+
+    def version(self) -> int | None:
+        """Return the running manager's major version, or ``None`` if unreadable."""
+        result = self._systemctl("--version")
+        match = _VERSION_RE.search(result.stdout or result.stderr)
+        return int(match.group(1)) if match is not None else None
+
+    def catchup_health(
+        self, automations: Automations, tasks: Sequence[TaskSpec]
+    ) -> list[HealthCheck]:
+        if not catchup.triggers_wanted(automations, tasks):
+            return [
+                HealthCheck(
+                    "catch-up triggers",
+                    True,
+                    "not needed: no calendar occurrence a clock or timezone jump can lose",
+                )
+            ]
+        # Probe what is on disk, not what the manifest wants: after an upgrade
+        # the installed units keep their old triggers until `install` rewrites
+        # them, and a desired-state probe would show green for exactly the
+        # installs that need the reinstall.
+        service_path = self.unit_dir / CATCHUP_SERVICE
+        timer_path = self.unit_dir / CATCHUP_TIMER
+        ok = True
+        detail = f"{CATCHUP_TIMER} installed in {self.unit_dir}"
+        if not service_path.is_file() or not timer_path.is_file():
+            ok = False
+            detail = f"{CATCHUP_TIMER} is missing from {self.unit_dir}; run automationctl install"
+        else:
+            try:
+                current = (
+                    service_path.read_text(encoding="utf-8") == self.render_catchup_service()
+                    and timer_path.read_text(encoding="utf-8") == self.render_catchup_timer()
+                )
+            except OSError as exc:
+                ok, detail = False, f"{CATCHUP_TIMER} is unreadable: {exc}"
+            else:
+                if not current:
+                    ok = False
+                    detail = f"{CATCHUP_TIMER} is stale; run automationctl install"
+        checks = [HealthCheck("catch-up triggers", ok, detail)]
+        # An unreadable version is reported as a failure for the same reason an
+        # unreadable launchd probe means "reload": the check exists to catch a
+        # trigger that never fires, and "cannot tell" is not "fine".
+        running = self.version()
+        supported = running is not None and running >= CLOCK_TRIGGER_MIN_VERSION
+        checks.append(
+            HealthCheck(
+                "clock triggers",
+                supported,
+                f"systemd {running} supports OnTimezoneChange="
+                if supported
+                else (
+                    f"systemd {running} predates OnTimezoneChange= "
+                    f"(needs {CLOCK_TRIGGER_MIN_VERSION}+); only the boot backstop fires"
+                    if running is not None
+                    else "cannot determine the systemd version"
+                ),
             )
         )
         return checks

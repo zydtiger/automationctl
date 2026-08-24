@@ -125,6 +125,10 @@ class Backend(ABC):
         argv.append(task.name)
         return argv
 
+    def catchup_argv(self) -> list[str]:
+        """Return the argv a generated catch-up trigger starts."""
+        return [self.executable, "catch-up", "--manifest", str(self.manifest_path)]
+
     # -- reconciliation ----------------------------------------------------
 
     def existing_files(self) -> dict[str, str]:
@@ -235,6 +239,17 @@ class Backend(ABC):
     @abstractmethod
     def health(self) -> list[HealthCheck]:
         """Run read-only probes for ``doctor``."""
+
+    def catchup_health(
+        self, automations: Automations, tasks: Sequence[TaskSpec]
+    ) -> list[HealthCheck]:
+        """Report whether this host's catch-up triggers are installed and usable.
+
+        Separate from :meth:`health` because it needs the desired state, not
+        only the substrate: whether a trigger is missing depends on whether
+        this host selects anything for it to recover.
+        """
+        return []
 
 
 BACKEND_NAMES = ("systemd", "launchd")

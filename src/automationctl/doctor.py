@@ -77,10 +77,12 @@ def run(
     state_dir: Path,
 ) -> DoctorReport:
     """Probe the backend, the manifest, the environment, and required binaries."""
-    checks: list[HealthCheck] = list(backend.health())
-
     manifest = automations.manifest
     tasks = automations.enabled_tasks()
+
+    checks: list[HealthCheck] = list(backend.health())
+    checks.extend(backend.catchup_health(automations, tasks))
+
     checks.append(
         HealthCheck(
             "manifest",
