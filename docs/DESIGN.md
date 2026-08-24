@@ -154,7 +154,8 @@ Never branch per host.
 │   └── result.json              # summary_cmd output, when configured
 ├── last/<task>.json             # last outcome pointer (status, catch-up)
 ├── activated/<backend>.json     # content hash the scheduler last accepted (§11.14)
-└── locks/<name>.lock
+├── locks/<name>.lock            # the mutex a spec's `lock` field declares
+└── locks/tasks/<task>.lock      # the implicit per-task run lock (§11.16)
 
 ~/.config/systemd/user/automationctl-*.{service,timer}     # Linux, generated
 ~/Library/LaunchAgents/automationctl.*.plist               # macOS, generated
@@ -173,6 +174,7 @@ schema_version = 1
 timeout = "30m"
 on_failure = ["notify:ntfy"]
 randomized_delay = "5m"
+# catchup_sweep = "6h"                 # macOS only; off by default (§11.18)
 
 [hosts.workstation]
 tasks = [
@@ -308,7 +310,7 @@ lock = "gpu"
 | `timeout` | str | wrapper-enforced; unit backstop = timeout + 5m |
 | `randomized_delay` | str | jitter; systemd `RandomizedDelaySec`, mac wrapper sleep |
 | `persistent` | bool | default true for calendar schedules; run missed occurrences |
-| `lock` | str | named mutex; contended run exits as `skipped`, not failure |
+| `lock` | str | named mutex against *other* tasks; contended run exits as `skipped`, not failure. A task never runs twice at once regardless (§11.16) |
 | `summary_cmd` | [str] | post-run argv, receives stdout, produces `result.json` |
 | `on_failure` | [str] | notify transports; overrides defaults |
 | `allow_full_access` | bool | lint override marker |
@@ -379,11 +381,15 @@ WantedBy=timers.target
 <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
 ```
 
-macOS additionally gets one `automationctl.catchup` agent with
-`RunAtLoad=true`: it compares each persistent task's schedule against
-`last/<task>.json` and runs anything missed while the machine was off —
-launchd coalesces runs missed during sleep, but not across power-off, so
+Both platforms additionally get catch-up triggers, which compare each
+persistent task's schedule against `last/<task>.json` and run anything missed.
+macOS has one `automationctl.catchup` agent; Linux gets an
+`automationctl-catchup.service`/`.timer` pair where the host selects a
+persistent calendar task. Neither substrate replays an occurrence a timezone
+or clock jump moved past — each simply recalculates its next elapse — and
+launchd coalesces runs missed during sleep but not across power-off, so
 catch-up lives in the wrapper layer where both platforms behave identically.
+§11.18 records which events wake it on each platform.
 
 Units and plists are reconciled by filename prefix (`automationctl-` /
 `automationctl.`): `install` adds, updates, and garbage-collects stale ones.
@@ -473,8 +479,9 @@ wrapper is the only cross-platform component, and the only nontrivial runtime
 code:
 
 1. Load manifest + spec; snapshot both into `meta.json`.
-2. Acquire the named lock (`fcntl`, non-blocking). Contended → record
-   `skipped`, exit 0 (a skip is not a failure).
+2. Acquire the implicit per-task run lock, and the named lock when the spec
+   declares one (`fcntl`, non-blocking). Either contended → record `skipped`,
+   exit 0 (a skip is not a failure). See §11.16.
 3. Build environment: minimal base + `path_prepend` + `env_files` + task `env`.
    Env construction is wrapper-side so both platforms behave identically and
    units stay free of secrets.
@@ -817,3 +824,118 @@ activation memory is kept.
 due ones one at a time, in the foreground. A machine returning from a week
 offline should not start every missed agent job at once, and tasks sharing a
 named lock would turn most of them into skips anyway.
+
+### 11.16 Every run holds an implicit per-task lock
+
+§7 step 2 acquired a lock only where the spec declared one, so two triggers
+that genuinely overlap in time — a `Persistent=` replay racing a boot catch-up
+while a long agent task is still running — both proceeded. Layered triggers are
+only safe if they are idempotent, and §11.18 adds more of them, so the wrapper
+now always holds a lock for the whole exec lifecycle.
+
+The two locks answer different questions and are therefore both kept. A named
+lock excludes *other* tasks sharing a resource — `gpu`, `agents` — and is
+shared by every task naming it. The run lock excludes *the same task* from
+itself, and a task that declares no named lock still may not run twice at
+once. The run lock is taken first, then the named one; both are non-blocking,
+so no ordering can deadlock, and contention on either keeps the existing
+semantics exactly: `skipped`, exit 0, no notification.
+
+Run locks live in `locks/tasks/<task>.lock`, a subdirectory. User lock names
+are flat files directly in `locks/` and may not contain a separator, so no
+declared lock can name a run lock and a task may safely declare `lock` equal
+to its own name. Jitter still runs before both, so a randomized delay spreads
+starts rather than serializing behind a lock (§11.4 unchanged).
+
+### 11.17 A skip is not schedule coverage
+
+`catchup.decide` compared `last/<task>.json`'s `started_at` without looking at
+its status, so a `skipped` record satisfied the occurrence — and with §11.16
+turning duplicate triggers into skips, the loser of a race would cancel the
+catch-up the missed occurrence still needs. The two available fixes were to
+stop writing `last/<task>.json` on the skip path, or to have catch-up ignore
+skipped records. Catch-up ignores them.
+
+Suppressing the write was the worse trade. `last/<task>.json` is the last
+*outcome* pointer that `list` and `status` read; leaving a skip out of it would
+make both report a stale older run as the latest one, and "your task was
+skipped because it was already running" is exactly what an operator needs to
+see when a run appears not to have happened. Coverage is a catch-up question,
+so the rule lives in catch-up and the record layer keeps telling the truth.
+
+Only `skipped` is excluded. `failed`, `timeout`, and `error` are runs that
+happened and did not succeed; replaying them would turn every failing task into
+a retry loop the design never promised, and the failure has already been
+notified. The rule applies to interval schedules as well as calendar ones: a
+skip is not an elapsed interval either.
+
+Two consequences are accepted and recorded rather than engineered away. While
+a long run holds its lock, every further trigger produces another skip record
+and run directory, so a busy trigger set under a multi-hour run can push real
+records toward `prune --keep-runs`. And `last/<task>.json` is last-writer-wins:
+in the sub-millisecond window between a loser's failed lock and its write, a
+winner that finishes first can have its record overwritten by the skip, after
+which the next trigger re-runs the completed task once. Both windows are
+bounded, self-resolving, and cost one redundant record or run at worst.
+
+### 11.18 Trigger-driven catch-up
+
+Catch-up decided correctly but nothing woke it: on Linux no unit was generated
+at all, and on macOS only `RunAtLoad`. A timezone or clock jump that moves past
+a trigger time loses that occurrence outright, because both substrates simply
+recalculate their next elapse.
+
+*systemd.* `automationctl-catchup.service` (oneshot, `ExecStart` = `catch-up
+--manifest …`) plus `automationctl-catchup.timer` carrying `OnTimezoneChange=`,
+`OnClockChange=`, and an `OnBootSec=2m` backstop. They share the
+`automationctl-` prefix, so reconcile, GC, and activation treat them as
+ordinary desired state; the `catchup` name is reserved on this backend too, and
+`desired_files` refuses a task claiming it rather than overwriting it.
+
+The service carries **no** `TimeoutStartSec=`, unlike task services. One sweep
+runs every missed task serially (§11.15), so its runtime is the sum of runs
+that the wrapper already bounds individually; any single number here would be
+an invented aggregate whose failure mode is systemd killing the sweep mid-task
+and destroying the very occurrence it was recovering. `Type=oneshot` already
+defaults the directive to infinity, so omitting it is also what it means.
+
+The units are rendered only where the host selects at least one **persistent
+calendar** task. An interval schedule measures elapsed time, which has no
+wall-clock moment a jump can move past, and its generated timer self-recovers
+through its own monotonic triggers; an escape-hatch schedule is opaque to
+catch-up (§11.10), which declines it however it is woken. A sweep on such a
+host can still find due work — `decide` handles interval tasks — but nothing a
+clock or timezone jump makes more likely, so rendering triggers there would
+only duplicate coverage the substrate already provides. The same predicate
+drives rendering, activation, and the `doctor` probe — one question, one
+function — so they cannot disagree. Clock and timezone triggers need systemd
+242 or later; `doctor` reports an older manager as a failure, with upgrading
+(or accepting the boot backstop alone) as the remedy.
+
+*launchd.* The existing agent gains `WatchPaths = ["/etc/localtime"]`, since a
+timezone change re-points that symlink — with §9's standing caveat: launchd
+arms `WatchPaths` through `open()`, which follows symlinks, and whether a
+re-point is actually observed has not been verified on real macOS hardware, so
+the timezone trigger there awaits that check before it can be called proven. launchd exposes no clock-step event at
+all, so the only bound on how long a stepped clock can hide a missed run is a
+period: `[defaults] catchup_sweep = "<duration>"` adds `StartInterval` to the
+same agent. It is off unless asked for, because polling is a cost this design
+does not pay by default, and it is manifest-level rather than per-task because
+it configures the one generated agent, not any task. On systemd it is inert —
+the event triggers are exact there, and D1's "no polling on Linux" stands.
+
+The launchd agent stays unconditional, unlike the systemd units. It is also the
+`RunAtLoad` power-off recovery, its label is reserved on every host whether or
+not it is rendered, and narrowing existing behaviour is not what this change is
+for.
+
+*doctor.* A `catch-up triggers` check reports whether the trigger this host
+wants is installed, and on systemd a `clock triggers` check reports whether the
+running manager understands the directives. `OnClockChange=` and
+`OnTimezoneChange=` were both added in **systemd 242** ("Added in version 242."
+in `systemd.timer(5)`); an older manager accepts the unit, warns, and runs a
+timer that only ever fires on the boot backstop, which is exactly the silent
+gap the probe exists to surface. The version comes from `systemctl --version`
+through the command-runner seam (§11.2), and an unreadable answer is reported
+as a failure for the same reason an unreadable launchd probe means "reload"
+(§11.14): "cannot tell" is not "fine" for a trigger that fails silently.

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from conftest import Tree
 
+from automationctl.errors import ConfigError
 from automationctl.lint import ERROR, WARNING, lint
 
 
@@ -155,6 +156,22 @@ def test_reserved_task_name_is_rejected(tree: Tree) -> None:
 def test_invalid_task_name_is_rejected_at_load(tree: Tree) -> None:
     tree.write_task("bad name", 'description = "d"\ncommand = ["true"]\n')
     assert any("invalid task name" in item for item in messages(tree))
+
+
+def test_a_valid_catchup_sweep_passes_lint(tree: Tree) -> None:
+    tree.write_manifest(
+        'schema_version = 1\n\n[defaults]\ncatchup_sweep = "6h"\n\n'
+        '[hosts.testhost]\ntasks = ["hello"]\n'
+    )
+    tree.write_task("hello", 'description = "d"\ncommand = ["true"]\n')
+    assert lint(tree.load(), backend="launchd").ok
+
+
+def test_a_garbage_catchup_sweep_fails_before_lint_can_run(tree: Tree) -> None:
+    """A manifest-level type error is a load failure, not a per-task diagnostic."""
+    tree.write_manifest('schema_version = 1\n\n[defaults]\ncatchup_sweep = "soon"\n')
+    with pytest.raises(ConfigError, match="invalid duration"):
+        tree.load()
 
 
 def test_prompt_file_may_be_written_with_a_tilde(

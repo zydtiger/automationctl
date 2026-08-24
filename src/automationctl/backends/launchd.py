@@ -29,6 +29,12 @@ PLIST_SUFFIX = ".plist"
 CATCHUP_LABEL = "automationctl.catchup"
 LAUNCHCTL = "launchctl"
 
+#: Changing the system timezone re-points this symlink, and launchd's
+#: ``WatchPaths`` fires on the change. It is the only timezone signal launchd
+#: offers; there is no equivalent for a clock step, which is what the optional
+#: ``catchup_sweep`` interval exists to bound.
+LOCALTIME_PATH = "/etc/localtime"
+
 #: launchctl's exit code for "could not find service" — a definite "not loaded".
 #: Every other failure, 127 (launchctl absent) included, means "unknown".
 NOT_FOUND_RETURNCODE = 113
@@ -116,18 +122,26 @@ class LaunchdBackend(Backend):
                 ]
         return dump_plist(data)
 
-    def render_catchup(self) -> str:
+    def render_catchup(self, automations: Automations) -> str:
+        """Render the one agent that recovers occurrences launchd will not replay.
+
+        ``RunAtLoad`` covers power-off, ``WatchPaths`` covers a timezone
+        change, and the optional sweep covers what is left: launchd exposes no
+        clock-step event at all, so a bounded interval is the only way to put
+        an upper bound on how long a stepped clock can hide a missed run. It
+        is off unless the manifest asks for it, because polling is a cost the
+        design does not pay by default.
+        """
         data: dict[str, Any] = {
             "Label": CATCHUP_LABEL,
-            "ProgramArguments": [
-                self.executable,
-                "catch-up",
-                "--manifest",
-                str(self.manifest_path),
-            ],
+            "ProgramArguments": self.catchup_argv(),
             "ProcessType": "Background",
             "RunAtLoad": True,
+            "WatchPaths": [LOCALTIME_PATH],
         }
+        sweep = automations.manifest.defaults.catchup_sweep_seconds
+        if sweep is not None:
+            data["StartInterval"] = sweep
         return dump_plist(data)
 
     def desired_files(self, automations: Automations, tasks: Sequence[TaskSpec]) -> dict[str, str]:
@@ -141,7 +155,10 @@ class LaunchdBackend(Backend):
                     f"task {task.name!r} collides with the reserved {CATCHUP_LABEL} agent"
                 )
             files[name] = self.render_task(automations, task)
-        files[plist_name(CATCHUP_LABEL)] = self.render_catchup()
+        # Unconditional, unlike the systemd units: this agent is also the
+        # RunAtLoad power-off recovery every host wants, and its label is
+        # reserved on every host whether or not it is rendered.
+        files[plist_name(CATCHUP_LABEL)] = self.render_catchup(automations)
         return files
 
     # -- substrate operations ---------------------------------------------
@@ -289,3 +306,38 @@ class LaunchdBackend(Backend):
                 + ("" if domain.ok else f" unreachable: {domain.stderr.strip()}"),
             )
         ]
+
+    def catchup_health(
+        self, automations: Automations, tasks: Sequence[TaskSpec]
+    ) -> list[HealthCheck]:
+        path = self.unit_dir / plist_name(CATCHUP_LABEL)
+        if not path.is_file():
+            return [
+                HealthCheck(
+                    "catch-up triggers",
+                    False,
+                    f"{path} is missing; run automationctl install",
+                )
+            ]
+        # Probe the plist on disk, not the manifest's wishes: an upgraded tool
+        # or an edited sweep leaves the installed agent stale until `install`
+        # rewrites it, and that is exactly when a false green would hide it.
+        try:
+            installed = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return [HealthCheck("catch-up triggers", False, f"{path} is unreadable: {exc}")]
+        if installed != self.render_catchup(automations):
+            return [
+                HealthCheck(
+                    "catch-up triggers",
+                    False,
+                    f"{path} is stale; run automationctl install",
+                )
+            ]
+        sweep = automations.manifest.defaults.catchup_sweep_seconds
+        # There is no clock-step event to probe for, so the report says which
+        # triggers this agent actually carries and leaves the operator to judge
+        # whether the sweep is worth its cost on this machine.
+        detail = f"{CATCHUP_LABEL} watches {LOCALTIME_PATH} and runs at load"
+        detail += f", sweeping every {sweep}s" if sweep is not None else "; no sweep configured"
+        return [HealthCheck("catch-up triggers", True, detail)]

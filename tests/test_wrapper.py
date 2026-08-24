@@ -11,10 +11,11 @@ import pytest
 from conftest import HOST, Tree
 
 from automationctl import records
+from automationctl.catchup import decide
 from automationctl.commands import RecordingRunner
 from automationctl.config import Automations
 from automationctl.errors import ConfigError
-from automationctl.locks import named_lock
+from automationctl.locks import named_lock, run_lock
 from automationctl.wrapper import (
     DEFAULT_PATH,
     ExecOptions,
@@ -374,6 +375,49 @@ def test_uncontended_lock_lets_the_run_proceed(tree: Tree, tmp_path: Path) -> No
     tree.write_task("hello", 'description = "d"\ncommand = ["/bin/echo", "ran"]\nlock = "gpu"\n')
     result, _ = run_one(tree, tmp_path)
     assert result.status == records.STATUS_OK
+
+
+def test_a_second_run_of_an_unlocked_task_skips(tree: Tree, tmp_path: Path) -> None:
+    """Two overlapping triggers of a task that declares no lock: one run, one skip."""
+    tree.write_task("hello", 'description = "d"\ncommand = ["/bin/echo", "ran"]\n')
+    with run_lock(tree.state / "locks", "hello"):
+        result, _ = run_one(tree, tmp_path)
+    assert result.status == records.STATUS_SKIPPED
+    assert result.exit_code == 0
+    assert "already running" in result.reason
+    assert not (result.run_dir / records.STDOUT_FILE).exists()
+
+
+def test_the_implicit_run_lock_cannot_collide_with_a_named_lock(tree: Tree, tmp_path: Path) -> None:
+    """A user lock named after the task is a different lock, in a flat namespace."""
+    tree.write_task("hello", 'description = "d"\ncommand = ["/bin/echo", "ran"]\nlock = "hello"\n')
+    with named_lock(tree.state / "locks", "hello"):
+        contended, _ = run_one(tree, tmp_path)
+    assert contended.status == records.STATUS_SKIPPED
+    assert "lock 'hello'" in contended.reason
+
+    result, _ = run_one(tree, tmp_path)
+    assert result.status == records.STATUS_OK
+    assert (tree.state / "locks" / "hello.lock").is_file()
+    assert (tree.state / "locks" / "tasks" / "hello.lock").is_file()
+
+
+def test_a_skipped_run_does_not_cover_the_missed_occurrence(tree: Tree, tmp_path: Path) -> None:
+    """The loser of a duplicate trigger must not cancel the catch-up still owed."""
+    tree.write_task(
+        "hello", 'description = "d"\ncommand = ["/bin/echo", "ran"]\nschedule = "daily 03:00"\n'
+    )
+    with run_lock(tree.state / "locks", "hello"):
+        result, automations = run_one(tree, tmp_path)
+    assert result.status == records.STATUS_SKIPPED
+
+    last = records.read_last(tree.state, "hello")
+    assert last is not None
+    assert last["status"] == "skipped", "the skip stays visible to list and status"
+
+    decision = decide(automations, automations.tasks["hello"], state_dir=tree.state)
+    assert decision.due is True
+    assert "skipped" in decision.reason
 
 
 def test_summary_cmd_writes_result_json(tree: Tree, tmp_path: Path) -> None:

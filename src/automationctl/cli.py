@@ -379,7 +379,8 @@ def run(
     result = _run_task(session, task, jitter=jitter)
     typer.echo(
         f"{result.task}: {result.status} "
-        f"(exit {result.exit_code}, {result.duration_seconds:.1f}s, {result.run_dir})",
+        f"(exit {result.exit_code}, {result.duration_seconds:.1f}s, {result.run_dir})"
+        + (f"; {result.reason}" if result.reason else ""),
         err=True,
     )
     raise typer.Exit(_exit_code_for(result))
@@ -433,7 +434,10 @@ def catch_up(
         if not decision.due or dry_run:
             continue
         result = _run_task(session, session.task(decision.task), jitter=False)
-        typer.echo(f"     {result.task}: {result.status} (exit {result.exit_code})")
+        typer.echo(
+            f"     {result.task}: {result.status} (exit {result.exit_code})"
+            + (f"; {result.reason}" if result.reason else "")
+        )
         if result.failed:
             failures += 1
     if failures:

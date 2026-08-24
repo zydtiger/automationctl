@@ -11,12 +11,15 @@ from test_backend_systemd import MANIFEST, TASKS
 
 from automationctl import records
 from automationctl.backends import DELETE, UNCHANGED
-from automationctl.backends.launchd import CATCHUP_LABEL, LaunchdBackend
+from automationctl.backends.launchd import CATCHUP_LABEL, LOCALTIME_PATH, LaunchdBackend
 from automationctl.commands import CommandResult, RecordingRunner
 from automationctl.config import Automations
 from automationctl.errors import BackendError
 
 GOLDEN = Path(__file__).parent / "golden" / "launchd"
+#: The catch-up agent as rendered with the optional sweep configured. It lives
+#: outside GOLDEN because that directory is compared as a complete rendered set.
+SWEEP_GOLDEN = Path(__file__).parent / "golden" / "launchd-sweep"
 
 
 def make_backend(
@@ -102,13 +105,36 @@ def test_manual_plist_has_no_start_condition(
     assert "StartInterval" not in data
 
 
-def test_catchup_agent_runs_at_load(
+def test_catchup_agent_runs_at_load_and_watches_the_timezone(
     rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
 ) -> None:
+    """A timezone change re-points /etc/localtime; WatchPaths is the only signal."""
     _, _, files = rendered
     data = plistlib.loads(files[f"{CATCHUP_LABEL}.plist"].encode("utf-8"))
     assert data["RunAtLoad"] is True
     assert data["ProgramArguments"][1] == "catch-up"
+    assert data["WatchPaths"] == [LOCALTIME_PATH]
+    assert "StartInterval" not in data
+
+
+def test_the_catchup_sweep_is_off_unless_the_manifest_asks_for_it(
+    tree: Tree, tmp_path: Path
+) -> None:
+    """launchd cannot observe a clock step; the bounded fallback is opt-in."""
+    tree.write_manifest(
+        MANIFEST.replace('randomized_delay = "5m"', 'randomized_delay = "5m"\ncatchup_sweep = "6h"')
+    )
+    for name, text in TASKS.items():
+        tree.write_task(name, text)
+    automations = tree.load()
+    backend = make_backend(tree, tmp_path)
+    rendered = backend.desired_files(automations, automations.enabled_tasks())[
+        f"{CATCHUP_LABEL}.plist"
+    ]
+    assert rendered == (SWEEP_GOLDEN / f"{CATCHUP_LABEL}.plist").read_text(encoding="utf-8")
+    data = plistlib.loads(rendered.encode("utf-8"))
+    assert data["StartInterval"] == 21600
+    assert data["WatchPaths"] == [LOCALTIME_PATH]
 
 
 def test_plan_garbage_collects_stale_agents(
@@ -386,8 +412,56 @@ def test_enabled_is_unknown_when_launchctl_cannot_answer(tree: Tree, tmp_path: P
     assert backend.enabled(automations.tasks["calendar-task"]) is None
 
 
+def test_doctor_reports_the_catchup_agent_and_its_triggers(
+    rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
+) -> None:
+    backend, automations, files = rendered
+    tasks = automations.enabled_tasks()
+    assert backend.catchup_health(automations, tasks)[0].ok is False
+
+    backend.unit_dir.mkdir(parents=True)
+    backend.apply(backend.plan(files), files)
+    check = backend.catchup_health(automations, tasks)[0]
+    assert check.ok is True
+    assert LOCALTIME_PATH in check.detail
+    assert "no sweep configured" in check.detail
+
+
+def test_doctor_reports_a_configured_sweep(tree: Tree, tmp_path: Path) -> None:
+    tree.write_manifest(
+        MANIFEST.replace('randomized_delay = "5m"', 'randomized_delay = "5m"\ncatchup_sweep = "6h"')
+    )
+    for name, text in TASKS.items():
+        tree.write_task(name, text)
+    automations = tree.load()
+    backend = make_backend(tree, tmp_path)
+    files = backend.desired_files(automations, automations.enabled_tasks())
+    backend.unit_dir.mkdir(parents=True)
+    backend.apply(backend.plan(files), files)
+    check = backend.catchup_health(automations, automations.enabled_tasks())[0]
+    assert "sweeping every 21600s" in check.detail
+
+
 def test_launchd_cannot_follow_live_logs(
     rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
 ) -> None:
     backend, automations, _ = rendered
     assert backend.follow_argv(automations.tasks["calendar-task"]) is None
+
+
+def test_doctor_reports_a_stale_catchup_agent(
+    rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
+) -> None:
+    """A pre-upgrade plist without the current triggers must not read as ok."""
+    backend, automations, files = rendered
+    tasks = automations.enabled_tasks()
+    backend.unit_dir.mkdir(parents=True)
+    backend.apply(backend.plan(files), files)
+    path = backend.unit_dir / "automationctl.catchup.plist"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace("WatchPaths", "SomedayPaths"),
+        encoding="utf-8",
+    )
+    check = backend.catchup_health(automations, tasks)[0]
+    assert check.ok is False
+    assert "stale" in check.detail
