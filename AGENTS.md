@@ -35,6 +35,9 @@
 - Mechanical scope — lint, format, types, file hygiene — is defined solely by
   `.pre-commit-config.yaml`; do not restate those commands or their scopes
   elsewhere.
+- CI (`.github/workflows/ci.yml`) runs both hook stages over every file
+  across the supported Python versions, then `uv build`; it invokes the hook
+  runner rather than restating hook commands.
 
 ## Git
 
@@ -50,8 +53,17 @@
   - `refactor` — behavior-preserving structure
   - `test` — test-only changes
   - `build` — packaging, dependencies, project metadata
+  - `ci` — continuous-integration configuration
   - `chore` — other maintenance
 - Validate before committing.
+
+## Skill Distribution
+
+- The root `SKILL.md` is the single authoritative product usage skill
+  (`automationctl-skill`) and installs as one self-contained file. Keep its
+  frontmatter to `name` and `description` only, keep it free of personal
+  paths and private references, and update it whenever an agent's operational
+  use of the CLI changes. Installing it does not install the binary.
 
 ## Publication and Releases
 
