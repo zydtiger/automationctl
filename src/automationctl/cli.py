@@ -514,12 +514,11 @@ def install(
         for change in plan.changed
         if change.action in {backends.CREATE, backends.UPDATE}
     }
-    results = list(session.backend.apply(plan, desired))
-    results.extend(session.backend.reload())
-    results.extend(session.backend.activate(session.automations, tasks, desired, rewritten))
-    # The failure path speaks first: "installed N task(s)" after a refused
-    # scheduler command would be the last line a reader sees, and false.
-    _exit_on_substrate_failure(_report_results(results))
+    _exit_on_substrate_failure(_report_results(session.backend.apply(plan, desired)))
+    _exit_on_substrate_failure(_report_results(session.backend.reload()))
+    _exit_on_substrate_failure(
+        _report_results(session.backend.activate(session.automations, tasks, desired, rewritten))
+    )
     typer.echo(f"installed {len(tasks)} task(s) into {session.backend.unit_dir}")
 
 
@@ -548,12 +547,11 @@ def uninstall(
     if not targets:
         typer.echo("nothing to remove")
         return
-    results = list(session.backend.deactivate(targets))
+    _exit_on_substrate_failure(_report_results(session.backend.deactivate(targets)))
     for name in targets:
         (session.backend.unit_dir / name).unlink(missing_ok=True)
         typer.echo(f"removed: {session.backend.unit_dir / name}")
-    results.extend(session.backend.reload())
-    _exit_on_substrate_failure(_report_results(results))
+    _exit_on_substrate_failure(_report_results(session.backend.reload()))
 
 
 @app.command()

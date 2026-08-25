@@ -191,6 +191,8 @@ class Backend(ABC):
         removals = [item for item in plan.changes if item.action == DELETE]
         if removals:
             results.extend(self.deactivate([item.path.name for item in removals]))
+            if any(not result.ok for result in results):
+                return results
             for item in removals:
                 item.path.unlink(missing_ok=True)
         writes = [item for item in plan.changes if item.action in {CREATE, UPDATE}]

@@ -355,12 +355,16 @@ def test_deactivate_boots_out_when_the_probe_cannot_answer(
 def test_deactivate_skips_only_a_definitely_absent_agent(
     rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
 ) -> None:
-    backend, _, _ = rendered
+    backend, automations, files = rendered
     label = "automationctl.calendar-task"
+    backend.activate(automations, automations.enabled_tasks(), files)
+    assert label in records.read_activation(backend.state_dir, "launchd")
+
     runner = RecordingRunner(responses=not_loaded(label))
     backend.runner = runner
     assert backend.deactivate([f"{label}.plist"]) == []
     assert not any("bootout" in line for line in runner.transcript)
+    assert label not in records.read_activation(backend.state_dir, "launchd")
 
 
 def test_deactivate_forgets_the_activation_record(
@@ -375,6 +379,22 @@ def test_deactivate_forgets_the_activation_record(
     activated = records.read_activation(backend.state_dir, "launchd")
     assert "automationctl.calendar-task" not in activated
     assert "automationctl.catchup" in activated
+
+
+def test_deactivate_keeps_the_activation_record_when_bootout_fails(
+    rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
+) -> None:
+    backend, automations, files = rendered
+    tasks = automations.enabled_tasks()
+    backend.activate(automations, tasks, files)
+    label = "automationctl.calendar-task"
+    assert label in records.read_activation(backend.state_dir, "launchd")
+
+    backend.runner = FailingRunner()
+    results = backend.deactivate([f"{label}.plist"])
+
+    assert results and not results[0].ok
+    assert label in records.read_activation(backend.state_dir, "launchd")
 
 
 def test_control_verbs_use_the_expected_commands(

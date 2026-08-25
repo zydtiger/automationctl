@@ -771,9 +771,13 @@ away, and is what a pre-commit hook in the automations repository should run.
 ### 11.13 A refused scheduler command fails the verb
 
 `install`, `uninstall`, `pause`, `resume`, and `submit` exit non-zero if any
-control command failed, after printing a warning line for each. The files on
-disk still describe the desired state; what failed is the substrate's
-agreement with it, and a green exit code on a host whose timers were never
+control command failed, after printing a warning line for each. Removal is a
+staged operation: `uninstall` and reconcile garbage collection confirm every
+deactivation before unlinking any generated file. A refused deactivation keeps
+the complete file set for diagnosis and retry, and reconcile stops before
+applying creates, updates, reloads, or activations. Once removals succeed,
+later phases are likewise gated so a refused reload does not lead to an
+activation attempt. A green exit code on a host whose timers were never
 enabled is worse than no exit code at all.
 
 ### 11.14 launchd reloads only what it has not already activated

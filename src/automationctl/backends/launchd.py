@@ -268,10 +268,13 @@ class LaunchdBackend(Backend):
         domain_ok = self._domain_gate()
         for filename in filenames:
             label = self._label_of(filename)
-            activated.pop(label, None)
             if self._load_state(label, domain_ok) is False:
+                activated.pop(label, None)
                 continue
-            results.append(self._launchctl("bootout", self.service_target(label)))
+            stopped = self._launchctl("bootout", self.service_target(label))
+            results.append(stopped)
+            if stopped.ok:
+                activated.pop(label, None)
         records.write_activation(self.state_dir, self.name, activated)
         return results
 
