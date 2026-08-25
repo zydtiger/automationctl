@@ -38,9 +38,8 @@ jobs:
 
       - name: Run commit hooks
         run: |
-          uv tool install prek
-          prek run --all-files
-          prek run --all-files --hook-stage pre-push
+          uvx prek@0.4.14 run --all-files
+          uvx prek@0.4.14 run --all-files --hook-stage pre-push
 
       - name: Build distributions
         run: uv build
