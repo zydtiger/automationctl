@@ -433,11 +433,11 @@ to `./manifest.toml` in the current working directory and is overridable via
 
 ```
 $ automationctl list
-TASK                  SCHEDULE           ENABLED   LAST         RESULT
-canary                daily 08:00        yes       today 08:02  ok (4s)
-nightly-repo-audit    daily 03:00        yes       today 03:04  ok (11m)
-weekly-benchmark      weekly sun 05:00   yes       Aug 17       ok (2h 10m)
-mirror-notes          daily 04:30        yes       today 04:30  ok (8s)
+TASK                  SCHEDULE          DESIRED  SUBSTRATE  LAST         RESULT
+canary                daily 08:00       enabled  active     today 08:02  ok (4s)
+nightly-repo-audit    daily 03:00       enabled  active     today 03:04  ok (11m)
+weekly-benchmark      weekly sun 05:00  enabled  inactive   Aug 17       ok (2h 10m)
+mirror-notes          daily 04:30       disabled active     today 04:30  ok (8s)
 
 $ automationctl status nightly-repo-audit      # recent runs, exits, durations
 $ automationctl logs nightly-repo-audit        # last run's stdout/stderr
@@ -671,9 +671,14 @@ selects — debugging a spec before adding it to a host list is the common case.
 `install` renders only the host's selection, so the manifest remains the sole
 authority over what is scheduled.
 
-`list` reports a task as installed based on the presence of its generated
-files and only then asks the substrate whether it is enabled; it never queries
-the scheduler about a task it has not installed.
+`list` keeps desired and applied state separate. `DESIRED` reports the task
+spec's `disabled` setting. `SUBSTRATE` reports `not installed` when none of the
+task's generated files exist, `partial` when only some exist, and `stale` when
+the complete generated set differs from the current rendering. A complete,
+current scheduled task is `active`, `inactive`, or `unknown` according to the
+scheduler probe; a manual task whose backend has no schedule state is
+`installed`. Disabled desired state does not suppress the substrate probe, so
+`disabled active` exposes a spec change that has not yet been reconciled.
 
 ### 11.8 Configuration surface added during implementation
 

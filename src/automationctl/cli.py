@@ -194,18 +194,35 @@ def _print_table(rows: list[tuple[str, ...]]) -> None:
         typer.echo(line.rstrip())
 
 
-def _enabled_label(session: Session, task: TaskSpec) -> str:
-    if task.disabled:
-        return "disabled"
-    present = any(
-        (session.backend.unit_dir / name).exists() for name in session.backend.task_filenames(task)
-    )
-    if not present:
+def _desired_label(task: TaskSpec) -> str:
+    return "disabled" if task.disabled else "enabled"
+
+
+def _substrate_label(session: Session, task: TaskSpec) -> str:
+    filenames = session.backend.task_filenames(task)
+    possible = session.backend.possible_task_filenames(task)
+    existing = {name for name in possible if (session.backend.unit_dir / name).is_file()}
+    if not existing:
         return "not installed"
+    if any(name not in existing for name in filenames):
+        return "partial"
+    if any(name not in filenames for name in existing):
+        return "stale"
+
+    try:
+        desired = session.backend.desired_files(session.automations, [task])
+        if any(
+            (session.backend.unit_dir / name).read_text(encoding="utf-8") != desired.get(name)
+            for name in filenames
+        ):
+            return "stale"
+    except (AutomationctlError, OSError, TypeError, ValueError):
+        return "unknown"
+
     state = session.backend.enabled(task)
     if state is None:
-        return "installed"
-    return "yes" if state else "no"
+        return "installed" if task.schedule is None else "unknown"
+    return "active" if state else "inactive"
 
 
 def _last_columns(session: Session, task: TaskSpec) -> tuple[str, str]:
@@ -251,11 +268,17 @@ def list_tasks(
     if not tasks:
         typer.echo(f"no tasks selected for host {session.automations.host}")
         return
-    rows: list[tuple[str, ...]] = [("TASK", "SCHEDULE", "ENABLED", "LAST", "RESULT")]
+    rows: list[tuple[str, ...]] = [("TASK", "SCHEDULE", "DESIRED", "SUBSTRATE", "LAST", "RESULT")]
     for task in tasks:
         schedule = task.schedule.text if task.schedule is not None else "manual"
         rows.append(
-            (task.name, schedule, _enabled_label(session, task), *_last_columns(session, task))
+            (
+                task.name,
+                schedule,
+                _desired_label(task),
+                _substrate_label(session, task),
+                *_last_columns(session, task),
+            )
         )
     _print_table(rows)
 
@@ -279,7 +302,8 @@ def status(
         task = session.task(name)
         typer.echo(f"{task.name}: {task.description}")
         typer.echo(f"  schedule: {task.schedule.text if task.schedule else 'manual'}")
-        typer.echo(f"  substrate: {_enabled_label(session, task)}")
+        typer.echo(f"  desired: {_desired_label(task)}")
+        typer.echo(f"  substrate: {_substrate_label(session, task)}")
         decision = catchup.decide(
             session.automations,
             task,

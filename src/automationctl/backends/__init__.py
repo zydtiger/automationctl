@@ -113,6 +113,10 @@ class Backend(ABC):
     def task_filenames(self, task: TaskSpec) -> tuple[str, ...]:
         """Return the filenames one task generates."""
 
+    def possible_task_filenames(self, task: TaskSpec) -> tuple[str, ...]:
+        """Return every filename this task could have generated across spec changes."""
+        return self.task_filenames(task)
+
     @abstractmethod
     def desired_files(self, automations: Automations, tasks: Sequence[TaskSpec]) -> dict[str, str]:
         """Render every generated file for the given tasks."""

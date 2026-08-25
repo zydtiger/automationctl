@@ -291,6 +291,8 @@ class LaunchdBackend(Backend):
         ]
 
     def enabled(self, task: TaskSpec) -> bool | None:
+        if task.schedule is None:
+            return None
         return self._load_state(label_for(task.name))
 
     def follow_argv(self, task: TaskSpec) -> tuple[str, ...] | None:

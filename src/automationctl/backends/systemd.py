@@ -104,6 +104,9 @@ class SystemdBackend(Backend):
             return (service_name(task.name),)
         return (service_name(task.name), timer_name(task.name))
 
+    def possible_task_filenames(self, task: TaskSpec) -> tuple[str, ...]:
+        return (service_name(task.name), timer_name(task.name))
+
     def render_service(self, automations: Automations, task: TaskSpec) -> str:
         exec_start = " ".join(_quote(item) for item in self.exec_argv(task, host=automations.host))
         lines = [
