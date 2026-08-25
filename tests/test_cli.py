@@ -102,6 +102,16 @@ def test_missing_manifest_is_a_usage_error() -> None:
     assert "file not found" in result.output
 
 
+def test_manifest_defaults_to_the_current_working_directory(
+    cli: Tree, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
+    monkeypatch.chdir(cli.root)
+    result = runner.invoke(app, ["lint", "--host", "testhost"])
+    assert result.exit_code == 0
+    assert "lint: ok" in result.output
+
+
 def test_lint_passes_on_a_clean_tree(cli: Tree) -> None:
     cli.write_task("hello", 'description = "d"\ncommand = ["/bin/echo", "hi"]\n')
     result = invoke(cli, "lint")

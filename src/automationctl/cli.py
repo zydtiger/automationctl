@@ -32,7 +32,11 @@ EXIT_FAILURE = 1
 
 ManifestOption = Annotated[
     Path | None,
-    typer.Option("--manifest", help="Path to manifest.toml.", envvar=paths.MANIFEST_ENV),
+    typer.Option(
+        "--manifest",
+        help="Path to manifest.toml (default: ./manifest.toml).",
+        envvar=paths.MANIFEST_ENV,
+    ),
 ]
 HostOption = Annotated[
     str | None, typer.Option("--host", help="Host key to use instead of the short hostname.")

@@ -403,11 +403,12 @@ Hand edits are overwritten by design.
 
 ```
 $ uv tool install automationctl        # or: uv tool install git+<repo-url>
-$ git clone <private-remote>/automations ~/automations
+$ git clone <private-remote>/automations automations
+$ cd automations
 $ automationctl doctor
 ✓ backend: systemd user manager (running, 0 failed units)
 ✓ linger: enabled for current user
-✓ manifest: ~/automations/manifest.toml (schema 1, host workstation, 4 tasks)
+✓ manifest: /path/to/automations/manifest.toml (schema 1, host workstation, 4 tasks)
 ✓ env files: ~/.config/agent-env readable
 ✓ binaries: claude ✓  codex ✓  jq ✓  rsync ✓   (with configured path_prepend)
 ✗ state dir: created ~/.local/state/automationctl
@@ -419,9 +420,9 @@ $ automationctl install
 (agent CLIs invisible to non-interactive contexts) and environment (missing
 proxy vars). It probes both before any timer ever fires.
 
-Host defaults to the short hostname; `--host` overrides. `--manifest`
-defaults to `~/automations/manifest.toml`, overridable via
-`AUTOMATIONCTL_MANIFEST`.
+Host defaults to the short hostname; `--host` overrides. The manifest defaults
+to `./manifest.toml` in the current working directory and is overridable via
+`--manifest` or `AUTOMATIONCTL_MANIFEST`.
 
 ### 6.2 Daily operation
 
@@ -451,7 +452,7 @@ committed.
 ### 6.3 Changing automations (the standing workflow)
 
 ```
-$ cd ~/automations && git pull
+$ cd <automations-dir> && git pull
 $ $EDITOR tasks/nightly-repo-audit.toml
 $ automationctl lint
 $ automationctl install --dry-run --diff       # review rendered changes

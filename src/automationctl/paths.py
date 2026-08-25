@@ -20,7 +20,7 @@ UNIT_DIR_ENV = "AUTOMATIONCTL_UNIT_DIR"
 BACKEND_ENV = "AUTOMATIONCTL_BACKEND"
 EXECUTABLE_ENV = "AUTOMATIONCTL_EXECUTABLE"
 
-DEFAULT_MANIFEST = "~/automations/manifest.toml"
+DEFAULT_MANIFEST_NAME = "manifest.toml"
 
 Env = Mapping[str, str]
 
@@ -58,10 +58,10 @@ def locks_dir(env: Env | None = None) -> Path:
 
 
 def default_manifest_path(env: Env | None = None) -> Path:
-    """Return the manifest path from the environment, else the documented default."""
+    """Return the manifest override, else ``manifest.toml`` in the current directory."""
     values = _env(env)
     override = values.get(MANIFEST_ENV)
-    return expand(override) if override else expand(DEFAULT_MANIFEST)
+    return expand(override) if override else Path.cwd() / DEFAULT_MANIFEST_NAME
 
 
 def default_unit_dir(backend: str, env: Env | None = None) -> Path:

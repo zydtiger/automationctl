@@ -5,7 +5,7 @@ description: Operate the automationctl CLI to manage declarative scheduled autom
 
 # Use automationctl
 
-Select the configuration manifest with `--manifest` or `AUTOMATIONCTL_MANIFEST` when needed. The host key defaults to the short hostname; override it with `--host`. Treat the selected configuration as desired state: edit its specs and reinstall, and never edit generated scheduler units — `install` reconciles and overwrites them by design.
+Run commands from the directory containing `manifest.toml`, or select another manifest with `--manifest` or `AUTOMATIONCTL_MANIFEST`. The host key defaults to the short hostname; override it with `--host`. Treat the selected configuration as desired state: edit its specs and reinstall, and never edit generated scheduler units — `install` reconciles and overwrites them by design.
 
 Gate every change: run `automationctl lint`, preview with `automationctl install --dry-run --diff`, then `automationctl install`. Install refuses configuration that fails lint and garbage-collects units for tasks the manifest no longer selects. Run `automationctl doctor` for read-only host probes (backend, PATH resolution, env files, state directory) before the first install or when a task cannot start.
 

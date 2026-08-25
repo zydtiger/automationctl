@@ -18,12 +18,13 @@ decisions, and the milestone plan.
 
 ## Quickstart
 
-Task specs live in a separate configuration repository, conventionally
-`~/automations`. Copy [`examples/`](examples/) to get a working shape.
+Task specs live in a separate configuration directory. Copy
+[`examples/`](examples/) to get a working shape.
 
 ```bash
 uv tool install git+https://github.com/zydtiger/automationctl
-git clone <your-remote>/automations ~/automations
+git clone <your-remote>/automations automations
+cd automations
 
 automationctl doctor                 # read-only host probes: PATH, env, backend
 automationctl lint                   # schema, references, and policy
@@ -43,11 +44,11 @@ automationctl pause <task>           # temporary; the next install restores it
 automationctl prune --keep-runs 50   # run-record retention
 ```
 
-`--manifest` defaults to `~/automations/manifest.toml` and can be overridden
-per command or with `AUTOMATIONCTL_MANIFEST`. The host key defaults to the
-short hostname and can be overridden with `--host`. Run records live under
-`$XDG_STATE_HOME/automationctl` (else `~/.local/state/automationctl`) on both
-platforms.
+The manifest defaults to `./manifest.toml` in the current working directory.
+Override it per command with `--manifest` or with `AUTOMATIONCTL_MANIFEST`.
+The host key defaults to the short hostname and can be overridden with
+`--host`. Run records live under `$XDG_STATE_HOME/automationctl` (else
+`~/.local/state/automationctl`) on both platforms.
 
 ## Development
 

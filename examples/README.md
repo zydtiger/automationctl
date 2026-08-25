@@ -1,9 +1,9 @@
 # Example automations repository
 
 A complete, generic automations layout. Copy it into your own private
-repository — conventionally `~/automations` — and edit it there. Nothing in
-this directory is used by `automationctl` at runtime; it exists so that a new
-host has a working shape to start from.
+configuration directory and edit it there. Nothing in this directory is used
+by `automationctl` at runtime; it exists so that a new host has a working
+shape to start from.
 
 ```
 manifest.toml       schema version, host selection, defaults, notify, lint policy
