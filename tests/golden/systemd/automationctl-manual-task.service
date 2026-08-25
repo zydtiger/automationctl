@@ -5,5 +5,5 @@ Description=automationctl: manual-task
 
 [Service]
 Type=oneshot
-ExecStart=/opt/bin/automationctl exec --manifest /home/example/automations/manifest.toml manual-task
+ExecStart=/opt/bin/automationctl exec --manifest /home/example/automations/manifest.toml --host testhost manual-task
 TimeoutStartSec=900

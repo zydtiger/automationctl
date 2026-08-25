@@ -53,9 +53,10 @@ _VERSION_RE = re.compile(r"systemd\s+(\d+)")
 
 
 def _quote(value: str) -> str:
-    if value and not any(char.isspace() or char in '"\\' for char in value):
-        return value
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = value.replace("%", "%%").replace("$", "$$")
+    if escaped and not any(char.isspace() or char in '"\\' for char in escaped):
+        return escaped
+    escaped = escaped.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
 
 
@@ -104,7 +105,7 @@ class SystemdBackend(Backend):
         return (service_name(task.name), timer_name(task.name))
 
     def render_service(self, automations: Automations, task: TaskSpec) -> str:
-        exec_start = " ".join(_quote(item) for item in self.exec_argv(task))
+        exec_start = " ".join(_quote(item) for item in self.exec_argv(task, host=automations.host))
         lines = [
             f"# {GENERATED_HEADER}",
             "",
@@ -148,13 +149,14 @@ class SystemdBackend(Backend):
         lines.extend(["", "[Install]", "WantedBy=timers.target"])
         return "\n".join(lines) + "\n"
 
-    def render_catchup_service(self) -> str:
+    def render_catchup_service(self, automations: Automations) -> str:
         # No TimeoutStartSec=. Catch-up runs every missed task serially in one
         # foreground sweep, so its runtime is the sum of runs each of which the
         # wrapper already bounds by its own timeout; any single number here
         # would be an invented aggregate whose failure mode is systemd killing
         # the sweep mid-task and losing the very occurrence it was recovering.
         # Type=oneshot already defaults TimeoutStartSec= to infinity.
+        exec_start = " ".join(_quote(item) for item in self.catchup_argv(host=automations.host))
         return (
             "\n".join(
                 [
@@ -165,7 +167,7 @@ class SystemdBackend(Backend):
                     "",
                     "[Service]",
                     "Type=oneshot",
-                    f"ExecStart={' '.join(_quote(item) for item in self.catchup_argv())}",
+                    f"ExecStart={exec_start}",
                 ]
             )
             + "\n"
@@ -207,7 +209,7 @@ class SystemdBackend(Backend):
             if task.schedule is not None:
                 files[names[1]] = self.render_timer(automations, task)
         if catchup.triggers_wanted(automations, tasks):
-            files[CATCHUP_SERVICE] = self.render_catchup_service()
+            files[CATCHUP_SERVICE] = self.render_catchup_service(automations)
             files[CATCHUP_TIMER] = self.render_catchup_timer()
         return files
 
@@ -334,7 +336,8 @@ class SystemdBackend(Backend):
         else:
             try:
                 current = (
-                    service_path.read_text(encoding="utf-8") == self.render_catchup_service()
+                    service_path.read_text(encoding="utf-8")
+                    == self.render_catchup_service(automations)
                     and timer_path.read_text(encoding="utf-8") == self.render_catchup_timer()
                 )
             except OSError as exc:

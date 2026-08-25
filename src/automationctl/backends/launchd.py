@@ -106,7 +106,7 @@ class LaunchdBackend(Backend):
         )
         data: dict[str, Any] = {
             "Label": label_for(task.name),
-            "ProgramArguments": self.exec_argv(task, jitter=jitter),
+            "ProgramArguments": self.exec_argv(task, host=automations.host, jitter=jitter),
             "ProcessType": "Background",
             "RunAtLoad": False,
         }
@@ -134,7 +134,7 @@ class LaunchdBackend(Backend):
         """
         data: dict[str, Any] = {
             "Label": CATCHUP_LABEL,
-            "ProgramArguments": self.catchup_argv(),
+            "ProgramArguments": self.catchup_argv(host=automations.host),
             "ProcessType": "Background",
             "RunAtLoad": True,
             "WatchPaths": [LOCALTIME_PATH],

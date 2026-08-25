@@ -47,7 +47,23 @@ automationctl prune --keep-runs 50   # run-record retention
 The manifest defaults to `./manifest.toml` in the current working directory.
 Override it per command with `--manifest` or with `AUTOMATIONCTL_MANIFEST`.
 The host key defaults to the short hostname and can be overridden with
-`--host`. Run records live under `$XDG_STATE_HOME/automationctl` (else
+`--host`. Generated task and catch-up units preserve the host key selected by
+`install`, so a host alias keeps applying when the scheduler starts them.
+
+The generated scheduler artifacts intentionally stay small: they contain the
+schedule plus an `automationctl exec` invocation that identifies the manifest,
+selected host, and task. At run time, `exec` reloads the manifest, task spec,
+runner, and prompt, then applies the wrapper lifecycle (environment, locking,
+timeout, records, and notifications). The installed unit is therefore not a
+snapshot of the resolved task command; reinstall after configuration changes
+to keep desired state and generated scheduler state reconciled.
+
+After upgrading from a version that did not preserve explicit host aliases,
+run `automationctl install --host <alias>` once with the same alias used for
+the existing installation. This rewrites both task and catch-up units with the
+selected host key.
+
+Run records live under `$XDG_STATE_HOME/automationctl` (else
 `~/.local/state/automationctl`) on both platforms.
 
 ## Development

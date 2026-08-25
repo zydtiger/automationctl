@@ -5,4 +5,4 @@ Description=automationctl: catch up missed occurrences
 
 [Service]
 Type=oneshot
-ExecStart=/opt/bin/automationctl catch-up --manifest /home/example/automations/manifest.toml
+ExecStart=/opt/bin/automationctl catch-up --manifest /home/example/automations/manifest.toml --host testhost

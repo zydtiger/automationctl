@@ -201,6 +201,27 @@ def test_install_reconciles_and_enables(
     ]
 
 
+@pytest.mark.parametrize(
+    ("host", "rendered_host"),
+    [("mac", "mac"), ("node-%H-$USER", "node-%%H-$$USER")],
+)
+def test_install_pins_an_overridden_host_in_generated_units(
+    host: str, rendered_host: str, cli: Tree, tmp_path: Path, recorder: RecordingRunner
+) -> None:
+    cli.write_manifest(f'schema_version = 1\n\n[hosts."{host}"]\ntasks = ["hello"]\n')
+    cli.write_task(
+        "hello", 'description = "d"\ncommand = ["/usr/bin/true"]\nschedule = "daily 03:00"\n'
+    )
+
+    assert invoke_as(cli, host, "install").exit_code == 0
+    task_unit = (tmp_path / "units" / "automationctl-hello.service").read_text(encoding="utf-8")
+    catchup_unit = (tmp_path / "units" / "automationctl-catchup.service").read_text(
+        encoding="utf-8"
+    )
+    assert f"--host {rendered_host} hello" in task_unit
+    assert f"--host {rendered_host}" in catchup_unit
+
+
 def test_install_renders_no_catchup_units_without_a_persistent_calendar_task(
     cli: Tree, tmp_path: Path, recorder: RecordingRunner
 ) -> None:

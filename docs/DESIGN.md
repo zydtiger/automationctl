@@ -352,7 +352,7 @@ Description=automationctl: nightly-repo-audit
 
 [Service]
 Type=oneshot
-ExecStart=/home/user/.local/bin/automationctl exec --manifest /home/user/automations/manifest.toml nightly-repo-audit
+ExecStart=/home/user/.local/bin/automationctl exec --manifest /home/user/automations/manifest.toml --host workstation nightly-repo-audit
 TimeoutStartSec=3000                         # 45m task timeout + backstop; RuntimeMaxSec is ignored on oneshot
 ```
 
@@ -375,6 +375,7 @@ WantedBy=timers.target
   <string>/Users/user/.local/bin/automationctl</string>
   <string>exec</string>
   <string>--manifest</string><string>/Users/user/automations/manifest.toml</string>
+  <string>--host</string><string>laptop</string>
   <string>morning-brief</string>
 </array>
 <key>StartCalendarInterval</key>
@@ -383,6 +384,10 @@ WantedBy=timers.target
 
 Both platforms additionally get catch-up triggers, which compare each
 persistent task's schedule against `last/<task>.json` and run anything missed.
+Task and catch-up units preserve the host key selected by `install`; this is
+required when `--host` selects a stable alias rather than the machine's short
+hostname. The units remain dumb pointers, not resolved command snapshots:
+`exec` reloads the manifest, task, runner, and prompt for each run.
 macOS has one `automationctl.catchup` agent; Linux gets an
 `automationctl-catchup.service`/`.timer` pair where the host selects a
 persistent calendar task. Neither substrate replays an occurrence a timezone
@@ -475,7 +480,8 @@ $ automationctl uninstall --all                # remove everything managed
 
 ## 7. The `exec` wrapper lifecycle
 
-Every unit/plist runs `automationctl exec --manifest <path> <task>`. The
+Every unit/plist runs
+`automationctl exec --manifest <path> --host <selected-host> <task>`. The
 wrapper is the only cross-platform component, and the only nontrivial runtime
 code:
 
@@ -889,7 +895,7 @@ a trigger time loses that occurrence outright, because both substrates simply
 recalculate their next elapse.
 
 *systemd.* `automationctl-catchup.service` (oneshot, `ExecStart` = `catch-up
---manifest …`) plus `automationctl-catchup.timer` carrying `OnTimezoneChange=`,
+--manifest … --host …`) plus `automationctl-catchup.timer` carrying `OnTimezoneChange=`,
 `OnClockChange=`, and an `OnBootSec=2m` backstop. They share the
 `automationctl-` prefix, so reconcile, GC, and activation treat them as
 ordinary desired state; the `catchup` name is reserved on this backend too, and

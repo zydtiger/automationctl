@@ -5,5 +5,5 @@ Description=automationctl: calendar-task
 
 [Service]
 Type=oneshot
-ExecStart=/opt/bin/automationctl exec --manifest /home/example/automations/manifest.toml calendar-task
+ExecStart=/opt/bin/automationctl exec --manifest /home/example/automations/manifest.toml --host testhost calendar-task
 TimeoutStartSec=3000

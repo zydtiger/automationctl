@@ -117,17 +117,31 @@ class Backend(ABC):
     def desired_files(self, automations: Automations, tasks: Sequence[TaskSpec]) -> dict[str, str]:
         """Render every generated file for the given tasks."""
 
-    def exec_argv(self, task: TaskSpec, *, jitter: bool = False) -> list[str]:
+    def exec_argv(self, task: TaskSpec, *, host: str, jitter: bool = False) -> list[str]:
         """Return the argv a unit or plist uses to start one task."""
-        argv = [self.executable, "exec", "--manifest", str(self.manifest_path)]
+        argv = [
+            self.executable,
+            "exec",
+            "--manifest",
+            str(self.manifest_path),
+            "--host",
+            host,
+        ]
         if jitter:
             argv.append("--jitter")
         argv.append(task.name)
         return argv
 
-    def catchup_argv(self) -> list[str]:
+    def catchup_argv(self, *, host: str) -> list[str]:
         """Return the argv a generated catch-up trigger starts."""
-        return [self.executable, "catch-up", "--manifest", str(self.manifest_path)]
+        return [
+            self.executable,
+            "catch-up",
+            "--manifest",
+            str(self.manifest_path),
+            "--host",
+            host,
+        ]
 
     # -- reconciliation ----------------------------------------------------
 

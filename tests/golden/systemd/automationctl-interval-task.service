@@ -5,5 +5,5 @@ Description=automationctl: interval-task
 
 [Service]
 Type=oneshot
-ExecStart=/opt/bin/automationctl exec --manifest /home/example/automations/manifest.toml interval-task
+ExecStart=/opt/bin/automationctl exec --manifest /home/example/automations/manifest.toml --host testhost interval-task
 TimeoutStartSec=420

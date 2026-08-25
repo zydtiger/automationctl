@@ -13,6 +13,8 @@
 		<string>catch-up</string>
 		<string>--manifest</string>
 		<string>/home/example/automations/manifest.toml</string>
+		<string>--host</string>
+		<string>testhost</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

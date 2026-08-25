@@ -82,6 +82,8 @@ def test_calendar_plist_carries_start_calendar_interval(
         "exec",
         "--manifest",
         str(FIXED_MANIFEST),
+        "--host",
+        "testhost",
         "--jitter",
         "calendar-task",
     ]
@@ -113,6 +115,7 @@ def test_catchup_agent_runs_at_load_and_watches_the_timezone(
     data = plistlib.loads(files[f"{CATCHUP_LABEL}.plist"].encode("utf-8"))
     assert data["RunAtLoad"] is True
     assert data["ProgramArguments"][1] == "catch-up"
+    assert data["ProgramArguments"][-2:] == ["--host", "testhost"]
     assert data["WatchPaths"] == [LOCALTIME_PATH]
     assert "StartInterval" not in data
 

@@ -154,6 +154,7 @@ def test_catchup_units_carry_the_clock_and_boot_triggers(
     assert "OnCalendar" not in timer
     service = files[CATCHUP_SERVICE]
     assert "ExecStart=/opt/bin/automationctl catch-up --manifest" in service
+    assert "--host testhost" in service
     # Catch-up runs every missed task serially, so no invented aggregate bound.
     assert "TimeoutStartSec" not in service
 

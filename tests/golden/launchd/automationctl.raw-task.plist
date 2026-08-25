@@ -13,6 +13,8 @@
 		<string>exec</string>
 		<string>--manifest</string>
 		<string>/home/example/automations/manifest.toml</string>
+		<string>--host</string>
+		<string>testhost</string>
 		<string>--jitter</string>
 		<string>raw-task</string>
 	</array>
