@@ -452,7 +452,8 @@ $ automationctl resume weekly-benchmark
 
 `pause` is deliberately temporary: the git repo is the desired state, and
 `install` re-asserts it. Permanent disabling is `disabled = true` in the spec,
-committed.
+committed. `pause` and `resume` apply only to tasks with a schedule; manual
+tasks have no automatic trigger to control, so the CLI rejects both verbs.
 
 ### 6.3 Changing automations (the standing workflow)
 
@@ -975,3 +976,14 @@ doing so would silently bind a relative value to the lint process's working
 directory, which is the ambiguity this rule removes. `doctor` remains
 responsible for checking that the resulting host-local directories and env
 files exist and are accessible.
+
+### 11.20 Manual tasks have no pause or resume state
+
+A task without `schedule` still gets a substrate artifact so `submit` can run
+it in the background, but it has no automatic trigger to pause. Treating
+`pause` as a successful no-op on systemd while disabling and booting out the
+manual LaunchAgent on launchd gave one CLI verb two incompatible meanings.
+The CLI now rejects both `pause` and `resume` for manual tasks before calling
+the backend. `run` and `submit` remain the foreground and background execution
+paths, and `disabled = true` plus `install` remains the declarative way to
+remove a task's substrate artifact.

@@ -150,6 +150,12 @@ def _require_declared_host(session: Session) -> None:
     )
 
 
+def _require_scheduled_task(task: TaskSpec, verb: str) -> None:
+    """Reject schedule-control verbs for tasks with no schedule to control."""
+    if task.schedule is None:
+        raise _fail(f"cannot {verb} manual task {task.name!r}: task has no schedule")
+
+
 def _exit_code_for(result: ExecResult) -> int:
     if result.exit_code < 0:
         return 128 + abs(result.exit_code)
@@ -565,6 +571,7 @@ def pause(
     """Temporarily stop a task's schedule; the next install restores it."""
     session = _session(manifest, host, backend, unit_dir)
     task = session.task(task_name)
+    _require_scheduled_task(task, "pause")
     _exit_on_substrate_failure(_report_results(session.backend.pause(task)))
     typer.echo(f"paused {task.name} (temporary; install re-asserts the repository state)")
 
@@ -580,6 +587,7 @@ def resume(
     """Undo a pause."""
     session = _session(manifest, host, backend, unit_dir)
     task = session.task(task_name)
+    _require_scheduled_task(task, "resume")
     _exit_on_substrate_failure(_report_results(session.backend.resume(task)))
     typer.echo(f"resumed {task.name}")
 

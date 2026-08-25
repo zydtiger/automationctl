@@ -40,7 +40,7 @@ automationctl run <task>             # foreground, streaming, for debugging
 automationctl submit <task>          # background now, through the scheduler
 automationctl status <task>          # recent runs, exit codes, durations
 automationctl logs <task>            # the last run's captured output
-automationctl pause <task>           # temporary; the next install restores it
+automationctl pause <task>           # scheduled tasks only; next install restores it
 automationctl prune --keep-runs 50   # run-record retention
 ```
 
