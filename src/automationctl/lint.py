@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import paths
 from .config import Automations, load_prompt, resolve_repo_path
 from .errors import AutomationctlError, ScheduleError, TemplateError
 from .locks import lock_path
@@ -168,6 +169,42 @@ def _check_lock(task: TaskSpec, out: list[Diagnostic]) -> None:
         out.append(Diagnostic(ERROR, str(exc), task.name, task.path))
 
 
+def _check_runtime_path(
+    value: str,
+    field: str,
+    out: list[Diagnostic],
+    *,
+    task: TaskSpec | None = None,
+    path: Path,
+) -> None:
+    """Require paths whose runtime meaning must not depend on process cwd."""
+    if paths.expand(value).is_absolute():
+        return
+    out.append(
+        Diagnostic(
+            ERROR,
+            f"{field} must be an absolute path or a tilde-expanded home path: {value!r}",
+            task.name if task is not None else None,
+            path,
+        )
+    )
+
+
+def _check_host_runtime_paths(automations: Automations, out: list[Diagnostic]) -> None:
+    config = automations.host_config
+    for value in config.path_prepend:
+        _check_runtime_path(value, "path_prepend", out, path=automations.manifest.path)
+    for value in config.env_files:
+        _check_runtime_path(value, "env_files", out, path=automations.manifest.path)
+
+
+def _check_task_runtime_paths(task: TaskSpec, out: list[Diagnostic]) -> None:
+    if task.cwd is not None:
+        _check_runtime_path(task.cwd, "cwd", out, task=task, path=task.path)
+    for value in task.env_files:
+        _check_runtime_path(value, "env_files", out, task=task, path=task.path)
+
+
 def _check_argv(
     automations: Automations, task: TaskSpec, runner: Runner | None, out: list[Diagnostic]
 ) -> None:
@@ -247,6 +284,7 @@ def lint_task(automations: Automations, task: TaskSpec, backend: str) -> list[Di
     _check_schedule(task, backend, out)
     _check_notify(automations, task, out)
     _check_lock(task, out)
+    _check_task_runtime_paths(task, out)
     if task.command is not None or runner is not None:
         _check_argv(automations, task, runner, out)
     return out
@@ -267,6 +305,7 @@ def lint(
     """
     out: list[Diagnostic] = []
     scope = None if tasks is None else set(tasks)
+    _check_host_runtime_paths(automations, out)
     for error in automations.errors:
         if scope is None or error.path.stem in scope:
             out.append(Diagnostic(ERROR, error.message, error.path.stem, error.path))

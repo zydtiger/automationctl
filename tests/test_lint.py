@@ -133,6 +133,54 @@ def test_invalid_lock_name_is_rejected(tree: Tree) -> None:
     assert any("invalid lock name" in item for item in messages(tree))
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cwd", "work"),
+        ("cwd", "../work"),
+        ("env_files", ".env"),
+        ("env_files", "../shared.env"),
+        ("env_files", "$HOME/task.env"),
+    ],
+)
+def test_relative_task_runtime_paths_are_rejected(tree: Tree, field: str, value: str) -> None:
+    rendered = f'{field} = "{value}"\n' if field == "cwd" else f'{field} = ["{value}"]\n'
+    tree.write_task("hello", f'description = "d"\ncommand = ["true"]\n{rendered}')
+
+    assert any(
+        field in item and "absolute path or a tilde-expanded home path" in item
+        for item in messages(tree)
+    )
+
+
+@pytest.mark.parametrize("field", ["path_prepend", "env_files"])
+def test_relative_host_runtime_paths_are_rejected(tree: Tree, field: str) -> None:
+    tree.write_manifest(
+        f'schema_version = 1\n\n[hosts.testhost]\ntasks = ["hello"]\n{field} = ["local"]\n'
+    )
+    tree.write_task("hello", 'description = "d"\ncommand = ["true"]\n')
+
+    assert any(
+        field in item and "absolute path or a tilde-expanded home path" in item
+        for item in messages(tree)
+    )
+
+
+def test_absolute_and_home_runtime_paths_pass(tree: Tree) -> None:
+    tree.write_manifest(
+        'schema_version = 1\n\n[hosts.testhost]\ntasks = ["hello"]\n'
+        'path_prepend = ["~/bin", "/opt/tools/bin"]\n'
+        'env_files = ["~/.config/shared.env", "/etc/shared.env"]\n'
+    )
+    tree.write_task(
+        "hello",
+        'description = "d"\ncommand = ["true"]\ncwd = "~/work"\n'
+        'env_files = ["~/.config/task.env", "/etc/task.env"]\n',
+    )
+
+    assert messages(tree) == []
+
+
 def test_lint_can_target_specific_tasks(tree: Tree) -> None:
     tree.write_task("hello", 'description = "d"\ncommand = ["true"]\n')
     tree.write_task("broken", 'description = "d"\n')

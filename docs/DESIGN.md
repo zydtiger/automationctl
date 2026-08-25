@@ -303,9 +303,9 @@ lock = "gpu"
 | `command` | [str] | verbatim argv; mutually exclusive with `runner` |
 | `runner` | str | key into `runners.toml`; requires `prompt` or `prompt_file` |
 | `prompt` / `prompt_file` | str | inline text, or path relative to the automations repo |
-| `cwd` | str | tilde-expanded; existence checked by `doctor` |
+| `cwd` | str | absolute or home-relative (`~/...`); existence checked by `doctor` |
 | `env` | table | inline non-secret vars, e.g. `env = { FOO = "bar" }` |
-| `env_files` | [str] | extends host-level list |
+| `env_files` | [str] | absolute or home-relative (`~/...`); extends host-level list |
 | `schedule` | str | neutral grammar (§4.5); omit for manual-only tasks |
 | `timeout` | str | wrapper-enforced; unit backstop = timeout + 5m |
 | `randomized_delay` | str | jitter; systemd `RandomizedDelaySec`, mac wrapper sleep |
@@ -529,6 +529,11 @@ code:
   (tool refuses specs newer than it understands).
 - Exclusivity: `command` xor `runner`; `prompt` xor `prompt_file`.
 - References: runner exists, `prompt_file` exists, notify transport defined.
+- Runtime paths: `cwd`, host/task `env_files`, and host `path_prepend` must be
+  absolute or home-relative (`~/...`), so manual and scheduler invocations
+  cannot interpret the same configuration against different working
+  directories. Existence and readability remain `doctor` checks on the target
+  host.
 - Policy: expanded final argv is scanned against `[lint].forbidden_argv`;
   a hit is an error unless the task or runner carries
   `allow_full_access = true`. The deny-list lives in the private manifest —
@@ -957,3 +962,16 @@ gap the probe exists to surface. The version comes from `systemctl --version`
 through the command-runner seam (§11.2), and an unreadable answer is reported
 as a failure for the same reason an unreadable launchd probe means "reload"
 (§11.14): "cannot tell" is not "fine" for a trigger that fails silently.
+
+### 11.19 Runtime paths are independent of the wrapper working directory
+
+`cwd`, host/task `env_files`, and host `path_prepend` are consumed by the
+short-lived wrapper, while generated systemd services and launchd agents do
+not establish the same working directory as an operator's shell. Relative
+values would therefore change meaning between `run`, `submit`, scheduled
+`exec`, and catch-up. Lint rejects them and accepts only paths that are
+absolute after tilde expansion. It deliberately does not call `resolve()`:
+doing so would silently bind a relative value to the lint process's working
+directory, which is the ambiguity this rule removes. `doctor` remains
+responsible for checking that the resulting host-local directories and env
+files exist and are accessible.
