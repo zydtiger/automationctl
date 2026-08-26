@@ -19,8 +19,10 @@ from automationctl.errors import ConfigError
 from automationctl.locks import named_lock, run_lock
 from automationctl.wrapper import (
     DEFAULT_PATH,
+    NOTIFY_SUMMARY_BYTES,
     ExecOptions,
     ExecResult,
+    _read_result,
     build_env,
     exec_task,
     parse_env_file,
@@ -302,6 +304,20 @@ def test_meta_records_the_effective_manifest_defaults(tree: Tree, tmp_path: Path
         "randomized_delay_seconds": 300,
         "persistent": True,
     }
+
+
+def test_notification_summary_omits_an_oversized_result(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    records.write_json(
+        run_dir / records.RESULT_FILE,
+        {"summary": "x" * (NOTIFY_SUMMARY_BYTES + 1)},
+    )
+
+    summary = _read_result(run_dir)
+
+    assert summary.startswith("result omitted from notification (")
+    assert summary.endswith(" bytes)")
+    assert len(summary) < 100
 
 
 def test_failing_command_is_recorded_and_notified(tree: Tree, tmp_path: Path) -> None:

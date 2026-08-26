@@ -75,6 +75,7 @@ KILL_GRACE_SECONDS = 30.0
 VERSION_PROBE_TIMEOUT = 5.0
 STDERR_TAIL_LINES = 20
 STDERR_TAIL_BYTES = 64 * 1024
+NOTIFY_SUMMARY_BYTES = 64 * 1024
 
 
 def effective_snapshot(automations: Automations, task: TaskSpec) -> dict[str, Any]:
@@ -292,7 +293,14 @@ def _tail(path: Path, lines: int) -> str:
 
 
 def _read_result(run_dir: Path) -> str:
-    data = records.read_json(run_dir / records.RESULT_FILE)
+    path = run_dir / records.RESULT_FILE
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    if size > NOTIFY_SUMMARY_BYTES:
+        return f"result omitted from notification ({size} bytes)"
+    data = records.read_json(path)
     if data is None:
         return ""
     summary = data.get("summary")

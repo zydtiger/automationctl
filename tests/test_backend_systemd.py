@@ -330,6 +330,28 @@ def test_deactivate_disables_triggers_before_stopping_services(
     ]
 
 
+def test_deactivate_does_not_stop_services_when_disabling_a_timer_fails(
+    rendered: tuple[SystemdBackend, Automations, dict[str, str]],
+) -> None:
+    backend, _, _ = rendered
+    argv = (
+        "systemctl",
+        "--user",
+        "disable",
+        "--now",
+        "automationctl-calendar-task.timer",
+    )
+    runner = RecordingRunner(responses={argv: CommandResult(argv, 1, stderr="refused")})
+    backend.runner = runner
+
+    results = backend.deactivate(
+        ["automationctl-calendar-task.service", "automationctl-calendar-task.timer"]
+    )
+
+    assert any(not result.ok for result in results)
+    assert runner.transcript == ["systemctl --user disable --now automationctl-calendar-task.timer"]
+
+
 def test_enabled_reads_is_enabled_output(tree: Tree, tmp_path: Path) -> None:
     tree.write_manifest(MANIFEST)
     for name, text in TASKS.items():

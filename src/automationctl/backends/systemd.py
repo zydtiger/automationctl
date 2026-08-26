@@ -256,12 +256,14 @@ class SystemdBackend(Backend):
         # Disable every trigger before stopping any workload. Otherwise a
         # timer can fire between ``stop service`` and ``disable timer`` and
         # leave a fresh process running after uninstall or reconcile returns.
-        ordered = sorted(filenames, key=lambda name: not name.endswith(TIMER_SUFFIX))
-        for filename in ordered:
-            if filename.endswith(TIMER_SUFFIX):
-                results.append(self._systemctl("disable", "--now", filename))
-            else:
-                results.append(self._systemctl("stop", filename))
+        timers = sorted(name for name in filenames if name.endswith(TIMER_SUFFIX))
+        services = sorted(name for name in filenames if not name.endswith(TIMER_SUFFIX))
+        for filename in timers:
+            results.append(self._systemctl("disable", "--now", filename))
+        if any(not result.ok for result in results):
+            return results
+        for filename in services:
+            results.append(self._systemctl("stop", filename))
         return results
 
     def submit(self, task: TaskSpec) -> list[CommandResult]:

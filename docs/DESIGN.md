@@ -1021,6 +1021,9 @@ which can be sensitive despite the rule that secrets do not belong in specs.
 than reading a complete log before selecting its last lines. Both paths cap
 the bytes retained, with a larger bound for operator-requested logs; an
 unusually long line may therefore be represented by its retained suffix.
+Failure notifications also inspect `result.json` only below a fixed size;
+oversized summaries are identified by byte count instead of loaded into the
+notification body.
 
 ### 11.25 Count options are positive
 
