@@ -120,6 +120,41 @@ def test_list_reports_stale_generated_content(list_cli: ListCli) -> None:
     assert "stale" in result.output
 
 
+def test_uninstall_removes_historical_timer_after_task_becomes_manual(
+    list_cli: ListCli,
+) -> None:
+    tree, unit_dir, _ = list_cli
+    tree.write_task("hello", scheduled_task())
+    assert invoke(tree, "install").exit_code == 0
+    tree.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
+
+    result = invoke(tree, "uninstall", "hello")
+
+    assert result.exit_code == 0
+    assert not any("hello" in path.name for path in unit_dir.iterdir())
+
+
+@pytest.mark.parametrize(
+    ("args", "option"),
+    [
+        (("status", "hello", "--limit", "0"), "--limit"),
+        (("status", "hello", "--limit", "-1"), "--limit"),
+        (("logs", "hello", "--lines", "0"), "--lines"),
+        (("logs", "hello", "--lines", "-1"), "--lines"),
+    ],
+)
+def test_count_options_require_positive_values(
+    list_cli: ListCli, args: tuple[str, ...], option: str
+) -> None:
+    tree, _, _ = list_cli
+    tree.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
+
+    result = invoke(tree, *args)
+
+    assert result.exit_code == 2
+    assert option in result.output
+
+
 def test_list_reports_a_leftover_timer_after_schedule_removal(list_cli: ListCli) -> None:
     tree, _, _ = list_cli
     tree.write_task("hello", scheduled_task())

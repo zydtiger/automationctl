@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -79,6 +80,34 @@ def test_atomic_write_leaves_no_temp_file_behind(tmp_path: Path) -> None:
     path = tmp_path / "nested" / "value.json"
     records.write_json(path, {"a": 1})
     assert [entry.name for entry in path.parent.iterdir()] == ["value.json"]
+
+
+def test_state_directories_and_records_are_private(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir(mode=0o755)
+
+    run_dir = make_run(state, "audit", "20260823T030000Z-aaaaaa")
+    records.write_last(state, "audit", {"status": "ok"})
+
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
+    assert stat.S_IMODE(run_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((run_dir / records.META_FILE).stat().st_mode) == 0o600
+    assert stat.S_IMODE(records.last_path(state, "audit").stat().st_mode) == 0o600
+
+
+def test_tail_lines_reads_only_the_requested_suffix(tmp_path: Path) -> None:
+    path = tmp_path / "output.log"
+    path.write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+
+    assert records.tail_lines(path, 2) == ["three", "four"]
+    assert records.tail_lines(path, 0) == []
+
+
+def test_tail_lines_can_bound_automatic_consumers(tmp_path: Path) -> None:
+    path = tmp_path / "output.log"
+    path.write_text("old data\n" + "x" * 100 + "\nlast\n", encoding="utf-8")
+
+    assert records.tail_lines(path, 20, max_bytes=8) == ["xx", "last"]
 
 
 def test_timestamps_round_trip() -> None:

@@ -64,7 +64,8 @@ the existing installation. This rewrites both task and catch-up units with the
 selected host key.
 
 Run records live under `$XDG_STATE_HOME/automationctl` (else
-`~/.local/state/automationctl`) on both platforms.
+`~/.local/state/automationctl`) on both platforms. The state root is kept at
+mode `0700`, and records and captured logs are created with mode `0600`.
 
 ## Development
 

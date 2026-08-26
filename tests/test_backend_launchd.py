@@ -454,21 +454,69 @@ def test_deactivate_keeps_the_activation_record_when_bootout_fails(
     assert label in records.read_activation(backend.state_dir, "launchd")
 
 
-def test_control_verbs_use_the_expected_commands(
+def test_submit_and_pause_use_the_expected_commands(
     rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
 ) -> None:
     backend, automations, _ = rendered
     task = automations.tasks["calendar-task"]
     backend.submit(task)
     backend.pause(task)
-    backend.resume(task)
     runner = backend.runner
     assert isinstance(runner, RecordingRunner)
     assert runner.transcript == [
         "launchctl kickstart -k gui/501/automationctl.calendar-task",
         "launchctl disable gui/501/automationctl.calendar-task",
+        "launchctl print gui/501/automationctl.calendar-task",
         "launchctl bootout gui/501/automationctl.calendar-task",
+    ]
+
+
+def test_pause_is_idempotent_when_the_agent_is_already_absent(tree: Tree, tmp_path: Path) -> None:
+    tree.write_manifest(MANIFEST)
+    for name, text in TASKS.items():
+        tree.write_task(name, text)
+    task = tree.load().tasks["calendar-task"]
+    label = "automationctl.calendar-task"
+    backend = make_backend(tree, tmp_path, RecordingRunner(responses=not_loaded(label)))
+
+    results = backend.pause(task)
+
+    assert all(result.ok for result in results)
+    runner = backend.runner
+    assert isinstance(runner, RecordingRunner)
+    assert not any("bootout" in line for line in runner.transcript)
+
+
+def test_resume_is_idempotent_when_the_agent_is_already_loaded(
+    rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
+) -> None:
+    backend, automations, _ = rendered
+    backend.resume(automations.tasks["calendar-task"])
+    runner = backend.runner
+    assert isinstance(runner, RecordingRunner)
+    assert runner.transcript == [
         "launchctl enable gui/501/automationctl.calendar-task",
+        "launchctl print gui/501/automationctl.calendar-task",
+    ]
+
+
+def test_resume_bootstraps_an_agent_that_is_absent(tree: Tree, tmp_path: Path) -> None:
+    tree.write_manifest(MANIFEST)
+    for name, text in TASKS.items():
+        tree.write_task(name, text)
+    task = tree.load().tasks["calendar-task"]
+    label = "automationctl.calendar-task"
+    backend = make_backend(tree, tmp_path, RecordingRunner(responses=not_loaded(label)))
+
+    results = backend.resume(task)
+
+    assert all(result.ok for result in results)
+    runner = backend.runner
+    assert isinstance(runner, RecordingRunner)
+    assert runner.transcript == [
+        "launchctl enable gui/501/automationctl.calendar-task",
+        "launchctl print gui/501/automationctl.calendar-task",
+        "launchctl print gui/501",
         f"launchctl bootstrap gui/501 {backend.unit_dir}/automationctl.calendar-task.plist",
     ]
 

@@ -315,6 +315,21 @@ def test_control_verbs_use_the_expected_commands(
     ]
 
 
+def test_deactivate_disables_triggers_before_stopping_services(
+    rendered: tuple[SystemdBackend, Automations, dict[str, str]],
+) -> None:
+    backend, _, _ = rendered
+
+    backend.deactivate(["automationctl-calendar-task.service", "automationctl-calendar-task.timer"])
+
+    runner = backend.runner
+    assert isinstance(runner, RecordingRunner)
+    assert runner.transcript == [
+        "systemctl --user disable --now automationctl-calendar-task.timer",
+        "systemctl --user stop automationctl-calendar-task.service",
+    ]
+
+
 def test_enabled_reads_is_enabled_output(tree: Tree, tmp_path: Path) -> None:
     tree.write_manifest(MANIFEST)
     for name, text in TASKS.items():

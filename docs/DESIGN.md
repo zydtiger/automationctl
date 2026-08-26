@@ -990,3 +990,59 @@ The CLI now rejects both `pause` and `resume` for manual tasks before calling
 the backend. `run` and `submit` remain the foreground and background execution
 paths, and `disabled = true` plus `install` remains the declarative way to
 remove a task's substrate artifact.
+
+### 11.21 Historical generated filenames remain removable
+
+A task's generated surface can shrink when its spec changes: on systemd, a
+scheduled task has a service and timer while a manual task has only a service.
+Single-task `uninstall` therefore resolves every filename the task could have
+generated, not only the current rendering. This lets it disable and remove a
+historical timer after the schedule has already been removed from the spec.
+
+### 11.22 Removal disables triggers before stopping workloads
+
+systemd removal orders every timer before every service. Stopping a service
+while its timer remains armed creates a window in which the timer can start a
+new process before it is disabled, leaving work running after `uninstall` or
+garbage collection reports completion. launchd needs no separate ordering:
+booting out one agent removes its trigger and process together.
+
+### 11.23 Runtime state is private
+
+The state root and its directories use mode `0700`; JSON records and captured
+stdout/stderr use `0600`. Tightening the root on every state write also protects
+historical children created by older versions even before their individual
+modes change. Run records contain expanded argv and task output, either of
+which can be sensitive despite the rule that secrets do not belong in specs.
+
+### 11.24 Log tails use bounded-memory reads
+
+`logs` and failure notifications scan backward in fixed-size chunks rather
+than reading a complete log before selecting its last lines. Notification
+tails additionally cap the bytes retained for the message; an unusually long
+line may therefore be represented by its retained suffix. Operator-requested
+logs remain line-count based.
+
+### 11.25 Count options are positive
+
+`status --limit` and `logs --lines` accept only positive integers. Python's
+slice semantics make zero mean the whole sequence in `[-0:]`, while the run
+iterator would return one entry before noticing a zero limit; rejecting those
+values makes the CLI contract explicit instead of exposing implementation
+accidents.
+
+### 11.26 Schedule control is idempotent on launchd
+
+`pause` disables the label and boots it out only when it may be loaded;
+`resume` enables the label and bootstraps it only when it is not already
+loaded. Repeating either command therefore preserves the requested state
+without turning launchd's "not found" or "already loaded" response into a
+false operational failure. An unknown load state is still handled in the safe
+direction: `resume` attempts a bootout before bootstrap and stops if that
+control command is refused.
+
+### 11.27 Host task selections are sets
+
+Manifest order controls display and activation order, but a host may select a
+task only once. Lint rejects duplicate names before install so one declarative
+task cannot emit repeated scheduler control commands.

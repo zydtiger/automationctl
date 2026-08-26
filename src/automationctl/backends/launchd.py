@@ -283,15 +283,27 @@ class LaunchdBackend(Backend):
 
     def pause(self, task: TaskSpec) -> list[CommandResult]:
         target = self.service_target(label_for(task.name))
-        return [self._launchctl("disable", target), self._launchctl("bootout", target)]
+        results = [self._launchctl("disable", target)]
+        if self._load_state(label_for(task.name)) is False:
+            return results
+        results.append(self._launchctl("bootout", target))
+        return results
 
     def resume(self, task: TaskSpec) -> list[CommandResult]:
         label = label_for(task.name)
         path = self.unit_dir / plist_name(label)
-        return [
-            self._launchctl("enable", self.service_target(label)),
-            self._launchctl("bootstrap", self.domain, str(path)),
-        ]
+        target = self.service_target(label)
+        results = [self._launchctl("enable", target)]
+        state = self._load_state(label)
+        if state is True:
+            return results
+        if state is None:
+            stopped = self._launchctl("bootout", target)
+            results.append(stopped)
+            if not stopped.ok:
+                return results
+        results.append(self._launchctl("bootstrap", self.domain, str(path)))
+        return results
 
     def enabled(self, task: TaskSpec) -> bool | None:
         if task.schedule is None:

@@ -292,7 +292,7 @@ def list_tasks(
 @app.command()
 def status(
     task_name: Annotated[str | None, typer.Argument(help="Task to inspect.")] = None,
-    limit: Annotated[int, typer.Option("--limit", "-n", help="Recent runs to show.")] = 10,
+    limit: Annotated[int, typer.Option("--limit", "-n", min=1, help="Recent runs to show.")] = 10,
     manifest: ManifestOption = None,
     host: HostOption = None,
     backend: BackendOption = None,
@@ -346,7 +346,7 @@ def logs(
     show_stderr: Annotated[
         bool, typer.Option("--stderr", help="Show stderr instead of stdout.")
     ] = False,
-    lines: Annotated[int, typer.Option("--lines", "-n", help="Tail this many lines.")] = 200,
+    lines: Annotated[int, typer.Option("--lines", "-n", min=1, help="Tail this many lines.")] = 200,
     manifest: ManifestOption = None,
     host: HostOption = None,
     backend: BackendOption = None,
@@ -372,7 +372,7 @@ def logs(
         typer.echo(f"no output captured at {path}")
         return
     typer.echo(f"# {path}")
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]:
+    for line in records.tail_lines(path, lines):
         typer.echo(line)
 
 
@@ -549,7 +549,9 @@ def uninstall(
         targets = sorted(existing)
     else:
         task = session.task(str(task_name))
-        targets = [name for name in session.backend.task_filenames(task) if name in existing]
+        targets = [
+            name for name in session.backend.possible_task_filenames(task) if name in existing
+        ]
     if not targets:
         typer.echo("nothing to remove")
         return

@@ -253,7 +253,11 @@ class SystemdBackend(Backend):
 
     def deactivate(self, filenames: Sequence[str]) -> list[CommandResult]:
         results: list[CommandResult] = []
-        for filename in filenames:
+        # Disable every trigger before stopping any workload. Otherwise a
+        # timer can fire between ``stop service`` and ``disable timer`` and
+        # leave a fresh process running after uninstall or reconcile returns.
+        ordered = sorted(filenames, key=lambda name: not name.endswith(TIMER_SUFFIX))
+        for filename in ordered:
             if filename.endswith(TIMER_SUFFIX):
                 results.append(self._systemctl("disable", "--now", filename))
             else:

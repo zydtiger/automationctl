@@ -322,7 +322,18 @@ def lint(
         )
 
     failed = {error.path.stem for error in automations.errors}
+    seen: set[str] = set()
     for name in automations.selected_names():
+        if name in seen:
+            out.append(
+                Diagnostic(
+                    ERROR,
+                    f"host {automations.host} selects duplicate task: {name}",
+                    None,
+                    automations.manifest.path,
+                )
+            )
+        seen.add(name)
         if name not in automations.tasks and name not in failed:
             out.append(
                 Diagnostic(

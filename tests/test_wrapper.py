@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import stat
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -260,6 +261,7 @@ def test_successful_run_records_meta_last_and_output(tree: Tree, tmp_path: Path)
     assert result.status == records.STATUS_OK
     assert result.exit_code == 0
     assert (result.run_dir / records.STDOUT_FILE).read_text() == "hello hello\n"
+    assert stat.S_IMODE((result.run_dir / records.STDOUT_FILE).stat().st_mode) == 0o600
     assert stdout.getvalue() == "hello hello\n"
 
     meta = records.read_meta(result.run_dir)

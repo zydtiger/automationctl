@@ -121,6 +121,13 @@ def test_host_selecting_an_unknown_task_is_an_error(tree: Tree) -> None:
     assert any("selects unknown task: ghost" in item for item in messages(tree))
 
 
+def test_host_selecting_a_task_twice_is_an_error(tree: Tree) -> None:
+    tree.write_manifest('schema_version = 1\n\n[hosts.testhost]\ntasks = ["hello", "hello"]\n')
+    tree.write_task("hello", 'description = "d"\ncommand = ["true"]\n')
+
+    assert any("selects duplicate task: hello" in item for item in messages(tree))
+
+
 def test_undeclared_host_is_a_warning_not_an_error(tree: Tree) -> None:
     tree.write_task("hello", 'description = "d"\ncommand = ["true"]\n')
     report = lint(tree.load("otherhost"), backend="systemd")

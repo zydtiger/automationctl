@@ -74,6 +74,7 @@ DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
 KILL_GRACE_SECONDS = 30.0
 VERSION_PROBE_TIMEOUT = 5.0
 STDERR_TAIL_LINES = 20
+STDERR_TAIL_BYTES = 64 * 1024
 
 
 def effective_snapshot(automations: Automations, task: TaskSpec) -> dict[str, Any]:
@@ -216,7 +217,12 @@ def _write_stdin(handle: IO[bytes], payload: bytes) -> None:
 
 
 def _pump(source: IO[bytes], sink: Path, passthrough: TextIO) -> None:
-    with sink.open("wb") as handle:
+    descriptor = os.open(
+        sink,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        records.PRIVATE_FILE_MODE,
+    )
+    with os.fdopen(descriptor, "wb") as handle:
         while True:
             chunk = source.readline()
             if not chunk:
@@ -282,11 +288,7 @@ def _probe_version(program: str, env: Mapping[str, str]) -> str | None:
 
 
 def _tail(path: Path, lines: int) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
-    return "\n".join(text.splitlines()[-lines:])
+    return "\n".join(records.tail_lines(path, lines, max_bytes=STDERR_TAIL_BYTES))
 
 
 def _read_result(run_dir: Path) -> str:
