@@ -285,6 +285,8 @@ def prune(state_dir: Path, keep_runs: int, tasks: list[str] | None = None) -> li
     """Delete all but the newest ``keep_runs`` run directories per task."""
     if keep_runs < 0:
         raise ValueError("keep_runs must not be negative")
+    if state_dir.exists():
+        ensure_private_dir(state_dir)
     removed: list[Path] = []
     for task in tasks if tasks is not None else known_tasks(state_dir):
         directories = run_dirs(state_dir, task)

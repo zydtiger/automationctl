@@ -68,6 +68,23 @@ def test_prune_walks_every_recorded_task(tmp_path: Path) -> None:
     assert len(records.prune(tmp_path, keep_runs=0)) == 2
 
 
+def test_prune_tightens_an_existing_state_root(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir(mode=0o755)
+
+    records.prune(state, keep_runs=50)
+
+    assert stat.S_IMODE(state.stat().st_mode) == 0o700
+
+
+def test_prune_does_not_create_an_absent_state_root(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+
+    records.prune(state, keep_runs=50)
+
+    assert not state.exists()
+
+
 def test_temp_names_are_unique_per_call(tmp_path: Path) -> None:
     """Two runs of one task can rewrite last/<task>.json at the same moment."""
     target = tmp_path / "last" / "audit.json"
