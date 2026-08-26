@@ -1018,10 +1018,9 @@ which can be sensitive despite the rule that secrets do not belong in specs.
 ### 11.24 Log tails use bounded-memory reads
 
 `logs` and failure notifications scan backward in fixed-size chunks rather
-than reading a complete log before selecting its last lines. Notification
-tails additionally cap the bytes retained for the message; an unusually long
-line may therefore be represented by its retained suffix. Operator-requested
-logs remain line-count based.
+than reading a complete log before selecting its last lines. Both paths cap
+the bytes retained, with a larger bound for operator-requested logs; an
+unusually long line may therefore be represented by its retained suffix.
 
 ### 11.25 Count options are positive
 

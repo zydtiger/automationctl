@@ -29,6 +29,7 @@ app = typer.Typer(
 
 EXIT_USAGE = 2
 EXIT_FAILURE = 1
+LOG_TAIL_BYTES = 8 * 1024 * 1024
 
 ManifestOption = Annotated[
     Path | None,
@@ -372,7 +373,7 @@ def logs(
         typer.echo(f"no output captured at {path}")
         return
     typer.echo(f"# {path}")
-    for line in records.tail_lines(path, lines):
+    for line in records.tail_lines(path, lines, max_bytes=LOG_TAIL_BYTES):
         typer.echo(line)
 
 

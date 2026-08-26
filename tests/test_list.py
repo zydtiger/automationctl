@@ -9,7 +9,7 @@ import pytest
 from conftest import Tree
 from typer.testing import CliRunner, Result
 
-from automationctl import backends
+from automationctl import backends, records
 from automationctl.backends import Backend
 from automationctl.cli import app
 from automationctl.commands import CommandResult, RecordingRunner
@@ -153,6 +153,25 @@ def test_count_options_require_positive_values(
 
     assert result.exit_code == 2
     assert option in result.output
+
+
+def test_logs_bounds_a_single_line_tail(list_cli: ListCli, monkeypatch: pytest.MonkeyPatch) -> None:
+    tree, _, _ = list_cli
+    tree.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
+    run_dir = records.create_run_dir(tree.state, "hello", "20260823T030000Z-aaaaaa")
+    records.write_meta(
+        run_dir,
+        {"task": "hello", "run_id": run_dir.name, "status": "ok"},
+    )
+    (run_dir / records.STDOUT_FILE).write_text(
+        "x" * (records.TAIL_CHUNK_SIZE * 2), encoding="utf-8"
+    )
+    monkeypatch.setattr("automationctl.cli.LOG_TAIL_BYTES", 8)
+
+    result = invoke(tree, "logs", "hello", "--lines", "1")
+
+    assert result.exit_code == 0
+    assert result.output.endswith("xxxxxxxx\n")
 
 
 def test_list_reports_a_leftover_timer_after_schedule_removal(list_cli: ListCli) -> None:

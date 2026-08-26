@@ -18,6 +18,7 @@ from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
 
+from . import records
 from .errors import AutomationctlError, LockBusy
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -61,6 +62,7 @@ def _hold(path: Path, busy: str) -> Iterator[Path]:
 
 def named_lock(lock_dir: Path, name: str) -> AbstractContextManager[Path]:
     """Hold the mutex a task's ``lock`` field declares."""
+    records.ensure_private_dir(lock_dir)
     return _hold(lock_path(lock_dir, name), f"lock {name!r} is held by another run")
 
 
@@ -71,4 +73,6 @@ def run_lock(lock_dir: Path, task: str) -> AbstractContextManager[Path]:
     which is what makes two overlapping triggers of the same task converge on
     one run and one skip even when the spec declares no ``lock``.
     """
+    records.ensure_private_dir(lock_dir)
+    records.ensure_private_dir(lock_dir / TASK_LOCK_DIR)
     return _hold(run_lock_path(lock_dir, task), f"task {task!r} is already running")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,16 @@ def test_a_run_lock_lives_in_its_own_namespace(tmp_path: Path) -> None:
         assert path == tmp_path / "tasks" / "gpu.lock"
         with named_lock(tmp_path, "gpu"):
             pass
+
+
+def test_lock_directories_are_private(tmp_path: Path) -> None:
+    lock_dir = tmp_path / "locks"
+
+    with run_lock(lock_dir, "audit"):
+        pass
+
+    assert stat.S_IMODE(lock_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((lock_dir / locks.TASK_LOCK_DIR).stat().st_mode) == 0o700
 
 
 def test_a_contended_run_lock_names_the_task(tmp_path: Path) -> None:
