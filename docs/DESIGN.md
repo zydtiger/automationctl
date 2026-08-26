@@ -382,8 +382,9 @@ WantedBy=timers.target
 <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>0</integer></dict>
 ```
 
-Both platforms additionally get catch-up triggers, which compare each
-persistent task's schedule against `last/<task>.json` and run anything missed.
+When the selected host has a persistent calendar task, both platforms
+additionally get catch-up triggers, which compare each persistent task's
+schedule against `last/<task>.json` and run anything missed.
 Task and catch-up units preserve the host key selected by `install`; this is
 required when `--host` selects a stable alias rather than the machine's short
 hostname. The units remain dumb pointers, not resolved command snapshots:
@@ -936,7 +937,8 @@ function — so they cannot disagree. Clock and timezone triggers need systemd
 242 or later; `doctor` reports an older manager as a failure, with upgrading
 (or accepting the boot backstop alone) as the remedy.
 
-*launchd.* The existing agent gains `WatchPaths = ["/etc/localtime"]`, since a
+*launchd.* A host that wants catch-up triggers gets one agent with `RunAtLoad`
+for power-off recovery and `WatchPaths = ["/etc/localtime"]`, since a
 timezone change re-points that symlink — with §9's standing caveat: launchd
 arms `WatchPaths` through `open()`, which follows symlinks, and whether a
 re-point is actually observed has not been verified on real macOS hardware, so
@@ -948,10 +950,11 @@ does not pay by default, and it is manifest-level rather than per-task because
 it configures the one generated agent, not any task. On systemd it is inert —
 the event triggers are exact there, and D1's "no polling on Linux" stands.
 
-The launchd agent stays unconditional, unlike the systemd units. It is also the
-`RunAtLoad` power-off recovery, its label is reserved on every host whether or
-not it is rendered, and narrowing existing behaviour is not what this change is
-for.
+The same `triggers_wanted` predicate drives launchd rendering, activation, and
+the `doctor` probe just as it does on systemd. A host with no persistent
+calendar work gets no catch-up artifact; if the last qualifying task becomes
+ineligible, reconcile deactivates and garbage-collects the old agent. The
+`catchup` label remains reserved on every host whether or not it is rendered.
 
 *doctor.* A `catch-up triggers` check reports whether the trigger this host
 wants is installed, and on systemd a `clock triggers` check reports whether the

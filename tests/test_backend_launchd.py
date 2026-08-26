@@ -140,6 +140,63 @@ def test_the_catchup_sweep_is_off_unless_the_manifest_asks_for_it(
     assert data["WatchPaths"] == [LOCALTIME_PATH]
 
 
+@pytest.mark.parametrize(
+    "spec",
+    [
+        'description = "d"\ncommand = ["true"]\n',
+        'description = "d"\ncommand = ["true"]\nschedule = "daily 03:00"\npersistent = false\n',
+        'description = "d"\ncommand = ["true"]\nschedule = "every 15m"\npersistent = true\n',
+        'description = "d"\ncommand = ["true"]\n\n[schedule]\n'
+        "launchd = [{ Weekday = 1, Hour = 9, Minute = 0 }]\n",
+    ],
+)
+def test_a_host_without_persistent_calendar_work_gets_no_catchup_agent(
+    tree: Tree, tmp_path: Path, spec: str
+) -> None:
+    tree.write_task("hello", spec)
+    automations = tree.load()
+    backend = make_backend(tree, tmp_path)
+    tasks = automations.enabled_tasks()
+
+    files = backend.desired_files(automations, tasks)
+    assert f"{CATCHUP_LABEL}.plist" not in files
+
+    backend.activate(automations, tasks, files)
+    runner = backend.runner
+    assert isinstance(runner, RecordingRunner)
+    assert not any(CATCHUP_LABEL in line for line in runner.transcript)
+
+
+def test_reconcile_removes_catchup_agent_when_it_is_no_longer_wanted(
+    tree: Tree, tmp_path: Path
+) -> None:
+    tree.write_task("hello", 'description = "d"\ncommand = ["true"]\nschedule = "daily 03:00"\n')
+    automations = tree.load()
+    backend = make_backend(tree, tmp_path)
+    initial = backend.desired_files(automations, automations.enabled_tasks())
+    backend.unit_dir.mkdir(parents=True)
+    backend.apply(backend.plan(initial), initial)
+    catchup_path = backend.unit_dir / f"{CATCHUP_LABEL}.plist"
+    assert catchup_path.exists()
+
+    tree.write_task(
+        "hello",
+        'description = "d"\ncommand = ["true"]\nschedule = "daily 03:00"\npersistent = false\n',
+    )
+    revised = tree.load()
+    desired = backend.desired_files(revised, revised.enabled_tasks())
+    plan = backend.plan(desired)
+
+    assert {change.path.name: change.action for change in plan.changes}[
+        f"{CATCHUP_LABEL}.plist"
+    ] == DELETE
+    backend.apply(plan, desired)
+    assert not catchup_path.exists()
+    runner = backend.runner
+    assert isinstance(runner, RecordingRunner)
+    assert f"launchctl bootout gui/501/{CATCHUP_LABEL}" in runner.transcript
+
+
 def test_plan_garbage_collects_stale_agents(
     rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
 ) -> None:
@@ -448,6 +505,22 @@ def test_doctor_reports_the_catchup_agent_and_its_triggers(
     assert check.ok is True
     assert LOCALTIME_PATH in check.detail
     assert "no sweep configured" in check.detail
+
+
+def test_doctor_reports_catchup_as_unneeded_without_persistent_calendar_work(
+    tree: Tree, tmp_path: Path
+) -> None:
+    tree.write_task("hello", 'description = "d"\ncommand = ["true"]\n')
+    automations = tree.load()
+    backend = make_backend(tree, tmp_path)
+
+    check = backend.catchup_health(automations, automations.enabled_tasks())[0]
+
+    assert check.ok is True
+    assert "not needed" in check.detail
+    runner = backend.runner
+    assert isinstance(runner, RecordingRunner)
+    assert runner.calls == []
 
 
 def test_doctor_reports_a_configured_sweep(tree: Tree, tmp_path: Path) -> None:

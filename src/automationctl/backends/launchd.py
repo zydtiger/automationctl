@@ -3,8 +3,8 @@
 Generated plists are dumb: ``ProgramArguments`` starts ``automationctl exec``
 and a start condition expresses the schedule. Because launchd has no
 randomized-delay control and does not replay runs missed across power-off, the
-plists pass ``--jitter`` where the spec asks for it and one extra
-``automationctl.catchup`` agent runs at load.
+plists pass ``--jitter`` where the spec asks for it and hosts with persistent
+calendar work get one extra ``automationctl.catchup`` agent that runs at load.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from .. import records
+from .. import catchup, records
 from ..commands import CommandResult, CommandRunner
 from ..config import Automations
 from ..errors import BackendError
@@ -155,10 +155,8 @@ class LaunchdBackend(Backend):
                     f"task {task.name!r} collides with the reserved {CATCHUP_LABEL} agent"
                 )
             files[name] = self.render_task(automations, task)
-        # Unconditional, unlike the systemd units: this agent is also the
-        # RunAtLoad power-off recovery every host wants, and its label is
-        # reserved on every host whether or not it is rendered.
-        files[plist_name(CATCHUP_LABEL)] = self.render_catchup(automations)
+        if catchup.triggers_wanted(automations, tasks):
+            files[plist_name(CATCHUP_LABEL)] = self.render_catchup(automations)
         return files
 
     # -- substrate operations ---------------------------------------------
@@ -228,7 +226,9 @@ class LaunchdBackend(Backend):
         results: list[CommandResult] = []
         activated = records.read_activation(self.state_dir, self.name)
         domain_ok = self._domain_gate()
-        labels = [label_for(task.name) for task in tasks] + [CATCHUP_LABEL]
+        labels = [label_for(task.name) for task in tasks]
+        if catchup.triggers_wanted(automations, tasks):
+            labels.append(CATCHUP_LABEL)
         for label in labels:
             target = self.service_target(label)
             filename = plist_name(label)
@@ -315,6 +315,14 @@ class LaunchdBackend(Backend):
     def catchup_health(
         self, automations: Automations, tasks: Sequence[TaskSpec]
     ) -> list[HealthCheck]:
+        if not catchup.triggers_wanted(automations, tasks):
+            return [
+                HealthCheck(
+                    "catch-up triggers",
+                    True,
+                    "not needed: no calendar occurrence a clock or timezone jump can lose",
+                )
+            ]
         path = self.unit_dir / plist_name(CATCHUP_LABEL)
         if not path.is_file():
             return [
