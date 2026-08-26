@@ -487,6 +487,20 @@ def test_pause_is_idempotent_when_the_agent_is_already_absent(tree: Tree, tmp_pa
     assert not any("bootout" in line for line in runner.transcript)
 
 
+def test_pause_stops_when_disable_is_refused(
+    rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
+) -> None:
+    backend, automations, _ = rendered
+    argv = ("launchctl", "disable", "gui/501/automationctl.calendar-task")
+    runner = RecordingRunner(responses={argv: CommandResult(argv, 1, stderr="refused")})
+    backend.runner = runner
+
+    results = backend.pause(automations.tasks["calendar-task"])
+
+    assert len(results) == 1 and not results[0].ok
+    assert runner.transcript == ["launchctl disable gui/501/automationctl.calendar-task"]
+
+
 def test_resume_is_idempotent_when_the_agent_is_already_loaded(
     rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
 ) -> None:
@@ -519,6 +533,20 @@ def test_resume_bootstraps_an_agent_that_is_absent(tree: Tree, tmp_path: Path) -
         "launchctl print gui/501",
         f"launchctl bootstrap gui/501 {backend.unit_dir}/automationctl.calendar-task.plist",
     ]
+
+
+def test_resume_stops_when_enable_is_refused(
+    rendered: tuple[LaunchdBackend, Automations, dict[str, str]],
+) -> None:
+    backend, automations, _ = rendered
+    argv = ("launchctl", "enable", "gui/501/automationctl.calendar-task")
+    runner = RecordingRunner(responses={argv: CommandResult(argv, 1, stderr="refused")})
+    backend.runner = runner
+
+    results = backend.resume(automations.tasks["calendar-task"])
+
+    assert len(results) == 1 and not results[0].ok
+    assert runner.transcript == ["launchctl enable gui/501/automationctl.calendar-task"]
 
 
 def test_enabled_reflects_launchctl_print(tree: Tree, tmp_path: Path) -> None:

@@ -284,6 +284,8 @@ class LaunchdBackend(Backend):
     def pause(self, task: TaskSpec) -> list[CommandResult]:
         target = self.service_target(label_for(task.name))
         results = [self._launchctl("disable", target)]
+        if not results[0].ok:
+            return results
         if self._load_state(label_for(task.name)) is False:
             return results
         results.append(self._launchctl("bootout", target))
@@ -294,6 +296,8 @@ class LaunchdBackend(Backend):
         path = self.unit_dir / plist_name(label)
         target = self.service_target(label)
         results = [self._launchctl("enable", target)]
+        if not results[0].ok:
+            return results
         state = self._load_state(label)
         if state is True:
             return results

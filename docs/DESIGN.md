@@ -1041,7 +1041,9 @@ loaded. Repeating either command therefore preserves the requested state
 without turning launchd's "not found" or "already loaded" response into a
 false operational failure. An unknown load state is still handled in the safe
 direction: `resume` attempts a bootout before bootstrap and stops if that
-control command is refused.
+control command is refused. Both verbs also stop immediately when their
+initial persistent-state command (`disable` or `enable`) is refused, so they
+never change the loaded process behind a state transition that did not land.
 
 ### 11.27 Host task selections are sets
 
