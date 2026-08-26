@@ -69,6 +69,37 @@ def _programs(automations: Automations, task: TaskSpec) -> list[str]:
     return programs
 
 
+def _state_dir_check(state_dir: Path) -> HealthCheck:
+    """Report whether runtime state can be written without creating anything."""
+    if os.path.lexists(state_dir):
+        if not state_dir.is_dir():
+            return HealthCheck("state dir", False, f"{state_dir} exists but is not a directory")
+        writable = os.access(state_dir, os.W_OK | os.X_OK)
+        return HealthCheck(
+            "state dir",
+            writable,
+            (
+                f"{state_dir} writable and searchable"
+                if writable
+                else f"{state_dir} is not writable and searchable"
+            ),
+        )
+
+    parent = state_dir.parent
+    while not os.path.lexists(parent) and parent != parent.parent:
+        parent = parent.parent
+    writable = parent.is_dir() and os.access(parent, os.W_OK | os.X_OK)
+    return HealthCheck(
+        "state dir",
+        writable,
+        (
+            f"{state_dir} is absent; lazy creation is available under writable parent {parent}"
+            if writable
+            else f"{state_dir} is absent and cannot be created under {parent}"
+        ),
+    )
+
+
 def run(
     automations: Automations,
     backend: Backend,
@@ -114,13 +145,7 @@ def run(
             )
         )
 
-    checks.append(
-        HealthCheck(
-            "state dir",
-            state_dir.is_dir(),
-            f"{state_dir}" if state_dir.is_dir() else f"{state_dir} does not exist yet",
-        )
-    )
+    checks.append(_state_dir_check(state_dir))
 
     # Keyed on the search path as well as the name: PATH is per task now, so
     # the same program can resolve differently — or not at all — for two tasks.

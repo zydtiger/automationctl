@@ -1,9 +1,9 @@
 """Filesystem locations owned by automationctl.
 
 The state directory is uniform across platforms (``$XDG_STATE_HOME`` else
-``~/.local/state``, subpath ``automationctl/``). Every location is overridable
-through an environment variable so that tests and dry runs never touch the
-machine's real scheduler or state.
+``~/.local/state``, subpath ``automationctl/``). Scheduler-facing locations
+and executable discovery remain injectable so tests and dry runs never touch
+the machine's real scheduler.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ from collections.abc import Mapping
 from pathlib import Path
 
 MANIFEST_ENV = "AUTOMATIONCTL_MANIFEST"
-STATE_DIR_ENV = "AUTOMATIONCTL_STATE_DIR"
 UNIT_DIR_ENV = "AUTOMATIONCTL_UNIT_DIR"
 BACKEND_ENV = "AUTOMATIONCTL_BACKEND"
 EXECUTABLE_ENV = "AUTOMATIONCTL_EXECUTABLE"
@@ -37,9 +36,6 @@ def expand(path: str | os.PathLike[str]) -> Path:
 def state_dir(env: Env | None = None) -> Path:
     """Return the state directory holding runs, last-run pointers, and locks."""
     values = _env(env)
-    override = values.get(STATE_DIR_ENV)
-    if override:
-        return expand(override)
     xdg = values.get("XDG_STATE_HOME")
     base = expand(xdg) if xdg else expand("~/.local/state")
     return base / "automationctl"

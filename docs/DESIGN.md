@@ -77,9 +77,12 @@ The litmus test for the code/config boundary: a stranger clones
 `automationctl`, points it at their own `automations` repo, and everything
 works. Any personal default baked into the tool is a boundary violation.
 
-State-dir location is uniform on both platforms (`$XDG_STATE_HOME` else
-`~/.local/state`): operational uniformity beats macOS platform purism for a
-personal tool.
+State-dir location is uniform on both platforms
+(`$XDG_STATE_HOME/automationctl` else
+`~/.local/state/automationctl`). It follows the standard XDG setting rather
+than an automationctl-specific override: one environment variable should not
+have two competing sources of truth. Operational uniformity beats macOS
+platform purism for a personal tool.
 
 ---
 
@@ -417,14 +420,17 @@ $ automationctl doctor
 ✓ manifest: /path/to/automations/manifest.toml (schema 1, host workstation, 4 tasks)
 ✓ env files: ~/.config/agent-env readable
 ✓ binaries: claude ✓  codex ✓  jq ✓  rsync ✓   (with configured path_prepend)
-✗ state dir: created ~/.local/state/automationctl
+✓ state dir: /home/user/.local/state/automationctl is absent; lazy creation is available under writable parent /home/user/.local/state
 $ automationctl install --dry-run --diff
 $ automationctl install
 ```
 
 `doctor` exists because the two predictable first-day failures are PATH
 (agent CLIs invisible to non-interactive contexts) and environment (missing
-proxy vars). It probes both before any timer ever fires.
+proxy vars). It probes both before any timer ever fires. The probe is
+read-only: an absent state directory is healthy when its nearest existing
+parent can create it, while an existing non-directory, an inaccessible
+directory, or a location without a creatable parent fails the check.
 
 Host defaults to the short hostname; `--host` overrides. The manifest defaults
 to `./manifest.toml` in the current working directory and is overridable via
@@ -594,9 +600,11 @@ section is the authoritative record of them.
 Five modules exist beyond §3.1's tree, each carrying a concern that would
 otherwise be duplicated or would fatten `cli.py`:
 
-- `paths.py` — every filesystem location (state dir, generated-unit dir,
-  manifest, the `automationctl` path embedded in units), each overridable by
-  an environment variable so that tests and dry runs never touch real state.
+- `paths.py` — canonical state-dir discovery plus the generated-unit dir,
+  manifest, and `automationctl` path embedded in units. State follows
+  `$XDG_STATE_HOME` (else `~/.local/state`) without an app-specific override;
+  tests inject alternate state paths through Python seams instead of changing
+  the public environment contract.
 - `errors.py` — the shared exception hierarchy, imported by every module.
 - `commands.py` — the seam described in §11.2. A backend's state directory is
   a required constructor argument for the same reason the seam exists: a
@@ -1050,3 +1058,18 @@ never change the loaded process behind a state transition that did not land.
 Manifest order controls display and activation order, but a host may select a
 task only once. Lint rejects duplicate names before install so one declarative
 task cannot emit repeated scheduler control commands.
+
+### 11.28 State discovery follows XDG and doctor checks creatability
+
+The runtime state root is `$XDG_STATE_HOME/automationctl` when
+`XDG_STATE_HOME` is set and `~/.local/state/automationctl` otherwise. There is
+no `AUTOMATIONCTL_STATE_DIR` override: callers that need to relocate XDG state
+use the standard variable, avoiding two environment settings for the same
+filesystem concern.
+
+`doctor` does not create the state root. An existing path must be a writable,
+searchable directory; a dangling symlink counts as an existing invalid entry.
+When the path is absent, the check walks to its nearest existing parent and
+passes only when that parent is a writable, searchable directory from which
+lazy runtime creation can proceed. Tests that need an isolated state root
+inject the path through the module or constructor seam.

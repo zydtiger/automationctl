@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
+import pytest
 from conftest import FIXED_EXECUTABLE, FIXED_MANIFEST, Tree
 
 from automationctl import doctor
@@ -137,3 +139,49 @@ def test_a_missing_env_file_is_reported(tree: Tree, tmp_path: Path) -> None:
     tree.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
     report = probe(tree, tmp_path)
     assert any("missing or unreadable" in detail for detail in details(report, "env file"))
+
+
+def test_an_absent_state_dir_passes_when_its_parent_is_writable(tree: Tree, tmp_path: Path) -> None:
+    report = probe(tree, tmp_path)
+    check = next(item for item in report.checks if item.name == "state dir")
+
+    assert check.ok is True
+    assert check.detail == (
+        f"{tree.state} is absent; lazy creation is available under writable parent {tmp_path}"
+    )
+
+
+def test_a_state_path_that_is_not_a_directory_fails(tree: Tree, tmp_path: Path) -> None:
+    tree.state.write_text("not a directory\n", encoding="utf-8")
+    report = probe(tree, tmp_path)
+    check = next(item for item in report.checks if item.name == "state dir")
+
+    assert check.ok is False
+    assert check.detail == f"{tree.state} exists but is not a directory"
+
+
+def test_a_dangling_state_dir_symlink_fails(tree: Tree, tmp_path: Path) -> None:
+    tree.state.symlink_to(tmp_path / "missing-target", target_is_directory=True)
+    report = probe(tree, tmp_path)
+    check = next(item for item in report.checks if item.name == "state dir")
+
+    assert check.ok is False
+    assert check.detail == f"{tree.state} exists but is not a directory"
+
+
+def test_an_absent_state_dir_fails_when_its_parent_is_not_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "blocked"
+    parent.mkdir()
+    state = parent / "nested" / "automationctl"
+    real_access = os.access
+
+    def access(path: str | os.PathLike[str], mode: int) -> bool:
+        return False if Path(path) == parent else real_access(path, mode)
+
+    monkeypatch.setattr(os, "access", access)
+    check = doctor._state_dir_check(state)
+
+    assert check.ok is False
+    assert check.detail == f"{state} is absent and cannot be created under {parent}"

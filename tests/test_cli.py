@@ -35,7 +35,7 @@ def recorder(monkeypatch: pytest.MonkeyPatch) -> Iterator[RecordingRunner]:
 
 @pytest.fixture
 def cli(tree: Tree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Tree:
-    monkeypatch.setenv("AUTOMATIONCTL_STATE_DIR", str(tree.state))
+    monkeypatch.setattr("automationctl.paths.state_dir", lambda env=None: tree.state)
     monkeypatch.setenv("AUTOMATIONCTL_UNIT_DIR", str(tmp_path / "units"))
     monkeypatch.setenv("AUTOMATIONCTL_EXECUTABLE", "/opt/bin/automationctl")
     monkeypatch.setenv("AUTOMATIONCTL_BACKEND", "systemd")

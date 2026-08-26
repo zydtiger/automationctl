@@ -66,6 +66,10 @@ selected host key.
 Run records live under `$XDG_STATE_HOME/automationctl` (else
 `~/.local/state/automationctl`) on both platforms. The state root is kept at
 mode `0700`, and records and captured logs are created with mode `0600`.
+There is no automationctl-specific state-directory override; set the standard
+`XDG_STATE_HOME` variable before invoking automationctl when the state root
+needs to move. `doctor` remains read-only and treats a missing state directory
+as healthy when its nearest existing parent permits lazy creation.
 
 ## Development
 
