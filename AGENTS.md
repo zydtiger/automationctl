@@ -82,6 +82,6 @@
   summarize the changes and disclose known limitations. Nothing is published
   to PyPI. Installation is `uv tool install
   git+https://github.com/zydtiger/automationctl@vX.Y.Z`, or unpinned from
-  `main`. To release: bump the version in `pyproject.toml` on `main`,
-  validate, tag that commit, push the tag, and publish the GitHub Release
-  from it.
+  `main`. To release: bump the version in `pyproject.toml` on `main`, run
+  `uv lock` to synchronize `uv.lock`, commit both files, validate, tag that
+  commit, push the tag, and publish the GitHub Release from it.
