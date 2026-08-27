@@ -30,14 +30,17 @@
 
 ## Validation
 
-- Full: `prek run --all-files && uv run pytest`
+- Full: `prek run --all-files && prek run --all-files --hook-stage pre-push`
 - Targeted: `uv run pytest tests/<file>` or a `::<test>` selector.
 - Mechanical scope — lint, format, types, file hygiene — is defined solely by
   `.pre-commit-config.yaml`; do not restate those commands or their scopes
   elsewhere.
-- CI (`.github/workflows/ci.yml`) runs both hook stages over every file
-  across the supported Python versions, then `uv build`; it invokes the hook
-  runner rather than restating hook commands.
+- Tests run from the same file as a `pre-push` stage hook, so the commit
+  stage stays fast and the test command has a single definition.
+- CI (`.github/workflows/ci.yml`) invokes the hook runner rather than
+  restating hook commands. A `lint` job runs the commit-stage hooks once,
+  and a matrixed `test` job runs the pre-push stage on every supported
+  Python version, then builds and smoke-tests the wheel on the lowest one.
 
 ## Git
 
