@@ -39,7 +39,8 @@ automationctl list                   # tasks, schedules, last outcome
 automationctl run <task>             # foreground, streaming, for debugging
 automationctl submit <task>          # background now, through the scheduler
 automationctl status <task>          # recent runs, exit codes, durations
-automationctl logs <task>            # the last run's captured output
+automationctl logs <task>            # failure-aware output from the last run
+automationctl logs <task> --both     # stdout and stderr as separate sections
 automationctl pause <task>           # scheduled tasks only; next install restores it
 automationctl prune --keep-runs 50   # run-record retention
 ```

@@ -447,7 +447,8 @@ weekly-benchmark      weekly sun 05:00  enabled  inactive   Aug 17       ok (2h 
 mirror-notes          daily 04:30       disabled active     today 04:30  ok (8s)
 
 $ automationctl status nightly-repo-audit      # recent runs, exits, durations
-$ automationctl logs nightly-repo-audit        # last run's stdout/stderr
+$ automationctl logs nightly-repo-audit        # failure-aware stream selection
+$ automationctl logs --both nightly-repo-audit # stdout then stderr, separately
 $ automationctl logs -f nightly-repo-audit     # follow journald live (Linux)
 
 $ automationctl run nightly-repo-audit         # foreground, streaming (debugging)
@@ -580,7 +581,7 @@ publication around M2–M3 after a self-containment audit.
 - PyPI name availability for `automationctl` (fallback: install from git).
 - Notify transports beyond ntfy: macOS `osascript` desktop notifications?
   email? (Transport interface makes this additive.)
-- Whether `logs` should page/merge historical runs or only show the latest.
+- Whether `logs` should page historical runs or only show the latest.
 - Journald rate limiting for very chatty agent output (tee already guarantees
   the file copy is complete).
 - Retention defaults: prune policy shipped as a scheduled task in
@@ -1073,3 +1074,21 @@ When the path is absent, the check walks to its nearest existing parent and
 passes only when that parent is a writable, searchable directory from which
 lazy runtime creation can proceed. Tests that need an isolated state root
 inject the path through the module or constructor seam.
+
+### 11.29 Historical logs preserve stream semantics
+
+Run records keep `stdout.log` and `stderr.log` separate. Stdout may be a
+machine-readable stream and is the input to `summary_cmd`; merging stderr into
+it would corrupt that contract. The two capture pumps also cannot reconstruct
+a strict cross-stream chronology after the fact.
+
+`logs` therefore selects rather than merges by default. A failed, timed-out,
+or wrapper-error run selects non-empty stderr; other runs select non-empty
+stdout; either choice falls back to the other stream when its preferred file
+is empty. The header identifies an automatic fallback, and a note identifies
+captured output in the unselected stream. `--stdout` and `--stderr` force one
+channel. `--both` prints stdout followed by stderr as labeled, separately
+bounded sections and makes no ordering claim between them. Raw files remain
+the authoritative interface for consumers that need one channel unchanged.
+Historical stream selectors cannot be combined with `--follow`, which reads
+the scheduler's live log rather than the capture files.

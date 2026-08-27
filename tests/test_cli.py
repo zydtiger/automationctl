@@ -446,6 +446,107 @@ def test_status_and_logs_read_the_run_records(cli: Tree) -> None:
     assert "recorded" in invoke(cli, "logs", "hello").output
 
 
+def write_log_record(
+    cli: Tree,
+    *,
+    status: str,
+    stdout: str | None = None,
+    stderr: str | None = None,
+) -> Path:
+    run_dir = records.create_run_dir(cli.state, "hello", "20260827T030000Z-aaaaaa")
+    records.write_meta(
+        run_dir,
+        {"task": "hello", "run_id": run_dir.name, "status": status},
+    )
+    if stdout is not None:
+        (run_dir / records.STDOUT_FILE).write_text(stdout, encoding="utf-8")
+    if stderr is not None:
+        (run_dir / records.STDERR_FILE).write_text(stderr, encoding="utf-8")
+    return run_dir
+
+
+def test_logs_auto_selects_stderr_for_a_failed_run(cli: Tree) -> None:
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
+    write_log_record(cli, status=records.STATUS_FAILED, stdout="partial\n", stderr="boom\n")
+
+    result = invoke(cli, "logs", "hello")
+
+    assert result.exit_code == 0
+    assert "boom" in result.output
+    assert "partial" not in result.output
+    assert "auto-selected: run failed" in result.output
+    assert "stdout.log also captured; use --stdout" in result.output
+
+
+def test_logs_auto_selects_stdout_for_a_successful_run(cli: Tree) -> None:
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
+    write_log_record(cli, status=records.STATUS_OK, stdout="result\n", stderr="progress\n")
+
+    result = invoke(cli, "logs", "hello")
+
+    assert result.exit_code == 0
+    assert "result" in result.output
+    assert "progress" not in result.output
+    assert "stderr.log also captured; use --stderr" in result.output
+
+
+def test_logs_falls_back_to_the_only_nonempty_stream(cli: Tree) -> None:
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
+    write_log_record(cli, status=records.STATUS_OK, stdout="", stderr="warning\n")
+
+    result = invoke(cli, "logs", "hello")
+
+    assert result.exit_code == 0
+    assert "warning" in result.output
+    assert "auto-selected: stdout empty" in result.output
+
+
+def test_logs_falls_back_to_stdout_when_a_failed_run_has_empty_stderr(cli: Tree) -> None:
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
+    write_log_record(cli, status=records.STATUS_FAILED, stdout="partial\n", stderr="")
+
+    result = invoke(cli, "logs", "hello")
+
+    assert result.exit_code == 0
+    assert "partial" in result.output
+    assert "auto-selected: stderr empty" in result.output
+
+
+def test_logs_explicit_stream_selection_and_both(cli: Tree) -> None:
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
+    write_log_record(cli, status=records.STATUS_FAILED, stdout="partial\n", stderr="boom\n")
+
+    stdout_result = invoke(cli, "logs", "hello", "--stdout")
+    stderr_result = invoke(cli, "logs", "hello", "--stderr")
+    both_result = invoke(cli, "logs", "hello", "--both")
+
+    assert "partial" in stdout_result.output
+    assert "boom" not in stdout_result.output
+    assert "boom" in stderr_result.output
+    assert "partial" not in stderr_result.output
+    assert "partial" in both_result.output
+    assert "boom" in both_result.output
+    assert both_result.output.index("stdout.log") < both_result.output.index("stderr.log")
+
+
+def test_logs_rejects_multiple_stream_selectors(cli: Tree) -> None:
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
+
+    result = invoke(cli, "logs", "hello", "--stdout", "--stderr")
+
+    assert result.exit_code == 2
+    assert "choose at most one" in result.output
+
+
+def test_logs_rejects_stream_selectors_while_following(cli: Tree) -> None:
+    cli.write_task("hello", 'description = "d"\ncommand = ["/usr/bin/true"]\n')
+
+    result = invoke(cli, "logs", "hello", "--follow", "--stderr")
+
+    assert result.exit_code == 2
+    assert "cannot be used with --follow" in result.output
+
+
 def test_status_prints_the_catch_up_decision(cli: Tree) -> None:
     """A schedule catch-up cannot evaluate has to say so somewhere visible."""
     cli.write_task(

@@ -344,8 +344,10 @@ def status(
 def logs(
     task_name: Annotated[str, typer.Argument(help="Task whose logs to show.")],
     follow: Annotated[bool, typer.Option("--follow", "-f", help="Follow live logs.")] = False,
-    show_stderr: Annotated[
-        bool, typer.Option("--stderr", help="Show stderr instead of stdout.")
+    show_stdout: Annotated[bool, typer.Option("--stdout", help="Show stdout only.")] = False,
+    show_stderr: Annotated[bool, typer.Option("--stderr", help="Show stderr only.")] = False,
+    show_both: Annotated[
+        bool, typer.Option("--both", help="Show stdout and stderr as separate sections.")
     ] = False,
     lines: Annotated[int, typer.Option("--lines", "-n", min=1, help="Tail this many lines.")] = 200,
     manifest: ManifestOption = None,
@@ -353,6 +355,11 @@ def logs(
     backend: BackendOption = None,
 ) -> None:
     """Show the last run's captured output, or follow the substrate's live log."""
+    selectors = [show_stdout, show_stderr, show_both]
+    if sum(selectors) > 1:
+        raise _fail("choose at most one of --stdout, --stderr, or --both")
+    if follow and any(selectors):
+        raise _fail("--stdout, --stderr, and --both cannot be used with --follow")
     session = _session(manifest, host, backend)
     task = session.task(task_name)
     if follow:
@@ -368,11 +375,63 @@ def logs(
     if latest is None:
         typer.echo(f"no recorded runs for {task.name}")
         return
-    path = latest.run_dir / (records.STDERR_FILE if show_stderr else records.STDOUT_FILE)
-    if not path.exists():
+
+    stdout_path = latest.run_dir / records.STDOUT_FILE
+    stderr_path = latest.run_dir / records.STDERR_FILE
+    stdout_captured = _has_log_output(stdout_path)
+    stderr_captured = _has_log_output(stderr_path)
+
+    if show_both:
+        if not stdout_captured and not stderr_captured:
+            typer.echo(f"no output captured for {task.name} run {latest.run_id}")
+            return
+        if stdout_captured:
+            _show_log(stdout_path, lines)
+        if stderr_captured:
+            _show_log(stderr_path, lines)
+        return
+
+    annotation: str | None = None
+    if show_stdout:
+        path = stdout_path
+    elif show_stderr:
+        path = stderr_path
+    elif latest.status in records.FAILURE_STATUSES and stderr_captured:
+        path = stderr_path
+        annotation = f"auto-selected: run {latest.status}"
+    elif stdout_captured:
+        path = stdout_path
+        if latest.status in records.FAILURE_STATUSES:
+            annotation = "auto-selected: stderr empty"
+    elif stderr_captured:
+        path = stderr_path
+        annotation = "auto-selected: stdout empty"
+    else:
+        typer.echo(f"no output captured for {task.name} run {latest.run_id}")
+        return
+
+    if not _has_log_output(path):
         typer.echo(f"no output captured at {path}")
         return
-    typer.echo(f"# {path}")
+    _show_log(path, lines, annotation=annotation)
+
+    if not any(selectors):
+        other_path = stderr_path if path == stdout_path else stdout_path
+        if _has_log_output(other_path):
+            option = "--stderr" if other_path == stderr_path else "--stdout"
+            typer.echo(f"note: {other_path.name} also captured; use {option}", err=True)
+
+
+def _has_log_output(path: Path) -> bool:
+    try:
+        return path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _show_log(path: Path, lines: int, *, annotation: str | None = None) -> None:
+    suffix = f" ({annotation})" if annotation else ""
+    typer.echo(f"# {path}{suffix}")
     for line in records.tail_lines(path, lines, max_bytes=LOG_TAIL_BYTES):
         typer.echo(line)
 
