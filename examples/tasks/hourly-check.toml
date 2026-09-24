@@ -1,0 +1,6 @@
+schema_version = 2
+name = "hourly-check"
+description = "Record a generic hourly health check"
+command = ["/usr/bin/true"]
+schedule = "every 1h"
+timeout = "2m"

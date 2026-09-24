@@ -1,18 +1,43 @@
 ---
 name: automationctl-skill
-description: Operate the automationctl CLI to manage declarative scheduled automations — lint and install task manifests to systemd or launchd, run and submit tasks, inspect run records, and recover missed occurrences safely.
+description: Install, inspect, run, and remove standalone automationctl tasks managed through XDG configuration.
 ---
 
 # Use automationctl
 
-Run commands from the directory containing `manifest.toml`, or select another manifest with `--manifest` or `AUTOMATIONCTL_MANIFEST`. The host key defaults to the short hostname; override it with `--host`. `install` preserves its selected host key in generated task and catch-up units, so a stable alias continues to resolve the same host configuration when the scheduler runs. Treat the selected configuration as desired state: edit its specs and reinstall, and never edit generated scheduler units — `install` reconciles and overwrites them by design.
+Treat a task file as install input, not runtime configuration. Run
+`automationctl lint FILE`, preview with `automationctl install FILE --dry-run
+--diff`, then install with `automationctl install FILE`; an existing name
+requires `--replace`. Each successful installation stores a complete schema-v2
+definition at `$XDG_CONFIG_HOME/automationctl/tasks/<name>.toml` (default
+`~/.config/automationctl/tasks/`). Do not edit generated scheduler files.
 
-Gate every change: run `automationctl lint`, preview with `automationctl install --dry-run --diff`, then `automationctl install`. Install refuses configuration that fails lint and garbage-collects units for tasks the manifest no longer selects. If scheduler deactivation is refused, `install` and `uninstall` keep the generated files intact and exit non-zero so the removal remains diagnosable and retryable. Write `cwd`, host/task `env_files`, and host `path_prepend` as absolute paths or home-relative `~/...` paths; lint rejects process-relative values because scheduler and manual working directories can differ. Run `automationctl doctor` for read-only host probes (backend, PATH resolution, env files, state directory) before the first install or when a task cannot start.
+Use `automationctl add NAME --every 1h -- COMMAND...` for a basic task; it
+captures the current absolute directory as `cwd`. Use `automationctl remove
+NAME` to stop its trigger and workload, delete its definition and generated
+artifacts, and retain historical run records. Deleting a source file does not
+remove an installed task.
 
-Use `run TASK` for a foreground, streaming debug run; `submit TASK` to start it now through the scheduler; `catch-up` to run missed persistent occurrences serially (idempotent — safe to invoke at any time). When the selected host has a persistent calendar task, `install` also generates automatic catch-up triggers: on Linux after a boot, a timezone change, or a clock step (systemd 242+); on macOS one shared agent runs at load and on timezone changes, with clock steps covered only by the opt-in `[defaults] catchup_sweep = "<duration>"` interval. Hosts without persistent calendar work get no automatic catch-up unit or agent; when a shared trigger does run, the decision layer still skips disabled, manual, non-persistent, and otherwise ineligible tasks. A manual sweep is therefore a diagnostic rather than routine maintenance; `doctor` reports whether triggers are required, installed, current, and supported by the running scheduler. Overlapping triggers are safe: every run holds an implicit per-task lock, so a duplicate records `skipped` instead of running twice.
+Run `automationctl run NAME` for foreground output, `submit NAME` to start it
+through the scheduler, and `exec NAME` only for scheduler-facing execution.
+`list`, `status`, `logs`, `doctor`, `catch-up`, `pause`, `resume`, and `prune`
+all discover installed tasks from the XDG config directory. `status NAME` and
+`logs NAME` can still read records after removal. `pause` and `resume` are
+temporary schedule control; reinstalling a task reasserts its configured
+enabled or disabled state.
 
-`exec` is the substrate entrypoint embedded in generated units, not an operator command. A generated unit stores the schedule plus the manifest path, selected host key, and task name; it does not contain a resolved snapshot of the task's command. On every trigger, `exec` reloads the manifest, task spec, runner, and prompt, then applies environment loading, locking, timeout, run records, and failure notifications. Reinstall after configuration changes so the scheduler artifacts and desired state remain reconciled. After upgrading an installation whose units predate preserved host aliases, run `automationctl install --host <alias>` once with the original alias to rewrite both task and catch-up units. `pause TASK` and `resume TASK` apply only to scheduled tasks, are idempotent, temporary, and undone by the next `install`; manual tasks have no schedule to control, so use `run` or `submit` to execute them. For permanent disabling, set `disabled = true` in the task spec.
+Task `command` is direct argv. `stdin` is an inline string; `stdin_file` is
+resolved relative to the source task file and copied into `stdin` at install
+time. `cwd`, `env_files`, and `path_prepend` must be absolute or home-relative.
+Task-local `[notify.<name>]` entries are referenced by `on_failure =
+["notify:<name>"]`; credentials belong in machine-local env files. A task
+uses `$HOME` as its cwd when no `cwd` is supplied, and the wrapper records
+stdout, stderr, timeout, locks, final argv, and outcome under
+`$XDG_STATE_HOME/automationctl`.
 
-Inspect with `list` (schedules, desired state, substrate state, and last outcomes), `status TASK` (recent runs), and `logs TASK` (captured output). `logs` auto-selects non-empty stderr for failed, timed-out, or wrapper-error runs and stdout otherwise, falling back when the preferred stream is empty; it notes when the unselected stream also has content. Use `--stdout` or `--stderr` to force one raw channel, and `--both` to print stdout then stderr as separate sections without implying cross-stream chronology. `--follow` reads the scheduler's live log instead of historical capture files and cannot be combined with those stream selectors. In `list`, `DESIRED` reflects the spec while `SUBSTRATE` reports installation and scheduler state; `partial`, `stale`, and `unknown` call for inspection followed by `install` when the desired configuration is valid. Run records live under `$XDG_STATE_HOME/automationctl` (else `~/.local/state/automationctl`); there is no automationctl-specific state-path override. `doctor` reports that location without creating it and treats an absent but creatable directory as healthy. Bound retention with `prune --keep-runs N`.
-
-Never put secrets in specs: notification URLs and tokens resolve from `env_files` at run time, and the manifest lint deny-list rejects dangerous argv unless the spec carries the explicit `allow_full_access = true` override.
+An optional `$XDG_CONFIG_HOME/automationctl/config.toml` contains only the
+lint deny-list and shared catch-up sweep setting. `catchup_sweep` is a launchd-only
+fallback and has no effect on systemd artifacts. The scheduler units propagate
+the resolved standard XDG config/state homes. There is no manifest, runner,
+host alias, current-directory configuration discovery, `--manifest`, `--host`,
+or `uninstall` compatibility command.

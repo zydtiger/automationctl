@@ -1,87 +1,64 @@
 # automationctl
 
-Agent-neutral automation runner for personal machines. Declarative task specs
-— agent CLI invocations (`claude`, `codex`, …) and arbitrary commands — are
-compiled to the platform's native scheduler: systemd user units on Linux,
-launchd LaunchAgents on macOS. There is no resident daemon; a short-lived
-per-run wrapper owns environment construction, named locks, timeouts, run
-records, and failure notifications.
+`automationctl` installs one self-contained task at a time into
+`$XDG_CONFIG_HOME/automationctl/tasks/` (normally `~/.config/automationctl/tasks/`).
+It renders a systemd user unit on Linux or a launchd LaunchAgent on macOS and
+executes each run through a short-lived wrapper with records, locks, timeouts,
+and optional task-local notifications.
 
-The tool contains zero agent-specific code. A runner is a table of argv in
-your own configuration repository, so a new agent CLI — or a changed flag — is
-a configuration edit, never a release.
+## Quick start
 
-Status: milestones M0–M3 implemented (models, lint, wrapper lifecycle, systemd
-and launchd backends, catch-up, full CLI). See
-[docs/DESIGN.md](docs/DESIGN.md) for the design contract, the architecture
-decisions, and the milestone plan.
-
-## Quickstart
-
-Task specs live in a separate configuration directory. Copy
-[`examples/`](examples/) to get a working shape.
-
-```bash
-uv tool install git+https://github.com/zydtiger/automationctl
-git clone <your-remote>/automations automations
-cd automations
-
-automationctl doctor                 # read-only host probes: PATH, env, backend
-automationctl lint                   # schema, references, and policy
-automationctl install --dry-run --diff
-automationctl install
+```toml
+# hourly-check.toml
+schema_version = 2
+name = "hourly-check"
+description = "Record a simple health check"
+command = ["/usr/bin/true"]
+schedule = "every 1h"
+timeout = "2m"
 ```
 
-Day to day:
-
 ```bash
-automationctl list                   # tasks, schedules, last outcome
-automationctl run <task>             # foreground, streaming, for debugging
-automationctl submit <task>          # background now, through the scheduler
-automationctl status <task>          # recent runs, exit codes, durations
-automationctl logs <task>            # failure-aware output from the last run
-automationctl logs <task> --both     # stdout and stderr as separate sections
-automationctl pause <task>           # scheduled tasks only; next install restores it
-automationctl prune --keep-runs 50   # run-record retention
+automationctl lint hourly-check.toml
+automationctl install hourly-check.toml --dry-run --diff
+automationctl install hourly-check.toml
+automationctl status hourly-check
 ```
 
-The manifest defaults to `./manifest.toml` in the current working directory.
-Override it per command with `--manifest` or with `AUTOMATIONCTL_MANIFEST`.
-The host key defaults to the short hostname and can be overridden with
-`--host`. Generated task and catch-up units preserve the host key selected by
-`install`, so a host alias keeps applying when the scheduler starts them.
+Use `install FILE --replace` to update an installed name, `remove TASK` to
+delete its definition and scheduler artifacts, and `add NAME --every 1h --
+COMMAND...` to create a simple task from the command line. `uninstall`,
+`--manifest`, `--host`, and `AUTOMATIONCTL_MANIFEST` are not supported.
 
-The generated scheduler artifacts intentionally stay small: they contain the
-schedule plus an `automationctl exec` invocation that identifies the manifest,
-selected host, and task. At run time, `exec` reloads the manifest, task spec,
-runner, and prompt, then applies the wrapper lifecycle (environment, locking,
-timeout, records, and notifications). The installed unit is therefore not a
-snapshot of the resolved task command; reinstall after configuration changes
-to keep desired state and generated scheduler state reconciled.
+Task files are copied into the XDG config directory. A source file, its
+working directory, or an external `stdin_file` may subsequently move without
+changing the installed definition; `stdin_file` is materialized as `stdin`
+during installation. By default a file task runs in `$HOME`; set `cwd`
+explicitly when it needs another directory. Command values are argv, never a
+shell command; use `sh -c` explicitly when a shell is intended.
 
-After upgrading from a version that did not preserve explicit host aliases,
-run `automationctl install --host <alias>` once with the same alias used for
-the existing installation. This rewrites both task and catch-up units with the
-selected host key.
-
-Run records live under `$XDG_STATE_HOME/automationctl` (else
-`~/.local/state/automationctl`) on both platforms. The state root is kept at
-mode `0700`, and records and captured logs are created with mode `0600`.
-There is no automationctl-specific state-directory override; set the standard
-`XDG_STATE_HOME` variable before invoking automationctl when the state root
-needs to move. `doctor` remains read-only and treats a missing state directory
-as healthy when its nearest existing parent permits lazy creation.
+`config.toml` in the same XDG directory is optional machine policy. It may
+contain the lint deny-list and `catchup_sweep`. The sweep is a launchd-only
+fallback; systemd ignores it because its clock and timezone triggers are always
+rendered. The policy does not provide task
+defaults, runners, host selection, notifications, or environment values.
+Generated scheduler artifacts receive the resolved `XDG_CONFIG_HOME` and
+`XDG_STATE_HOME`, so interactive and scheduled invocations load the same
+installed task set. Run records remain under `$XDG_STATE_HOME/automationctl`
+or `~/.local/state/automationctl`.
 
 ## Development
 
 ```bash
-uv sync
-prek install        # one-time per clone: installs the Git hooks
+uv sync --locked
+uv tool install prek  # once per machine
+prek install          # once per clone
 uv run automationctl --version
-uv run pytest
 ```
 
-`uv` and `prek` are machine prerequisites.
+Run the full, targeted, or documentation-only validation defined in
+`AGENTS.md`; those commands execute the same hook stages as CI. `uv` and `prek`
+are machine prerequisites.
 
 Tests are hermetic: rendering is checked against golden units and plists, the
 wrapper is exercised against stock POSIX tools, and every `systemctl` or

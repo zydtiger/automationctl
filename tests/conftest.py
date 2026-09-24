@@ -1,91 +1,25 @@
-"""Hermetic fixtures: a temporary automations repository and state directory.
-
-No test touches the real scheduler, the user's state directory, or the
-network. Scheduler control commands go through a recording runner, and every
-child process a test spawns is a stock POSIX tool.
-"""
+"""Hermetic fixtures for installed standalone task tests."""
 
 from __future__ import annotations
 
 import os
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
-from automationctl.commands import CommandResult, RecordingRunner
-
-# Typer forces terminal mode when it sees GITHUB_ACTIONS, FORCE_COLOR or
-# PY_COLORS (see typer/rich_utils.py), which renders CLI errors inside a
-# coloured, box-drawn Rich panel. That panel interleaves ANSI escapes and
-# hard-wraps the message, so the plain-substring assertions in test_list.py
-# stop matching. Typer's own escape hatch turns it back off, and the constant
-# it guards is evaluated at import time, so set it here rather than per test.
-os.environ.setdefault("_TYPER_FORCE_DISABLE_TERMINAL", "1")
-from automationctl.config import Automations, load
+from automationctl import backends
+from automationctl.commands import RecordingRunner
 
 HOST = "testhost"
-FIXED_EXECUTABLE = "/opt/bin/automationctl"
-FIXED_MANIFEST = Path("/home/example/automations/manifest.toml")
-
-MANIFEST = """\
-schema_version = 1
-
-[defaults]
-timeout = "10m"
-
-[hosts.testhost]
-tasks = ["hello"]
-
-[lint]
-forbidden_argv = ["--danger"]
-"""
-
-RUNNERS = """\
-schema_version = 1
-
-[runners.stdin-runner]
-argv = ["/bin/cat"]
-stdin = "prompt"
-
-[runners.argv-runner]
-argv = ["/bin/echo", "{prompt}"]
-
-[runners.full-runner]
-argv = ["/bin/echo", "--danger"]
-allow_full_access = true
-
-# A child that is handed a prompt on stdin and never reads it.
-[runners.sleep-runner]
-argv = ["/bin/sleep", "30"]
-stdin = "prompt"
-"""
-
-
-class FailingRunner(RecordingRunner):
-    """Records control commands and reports every one of them as refused.
-
-    Stands in for a scheduler that is absent or broken — the case where a
-    silent success is the worst possible outcome.
-    """
-
-    def run(self, argv: Sequence[str], *, timeout: float | None = None) -> CommandResult:
-        items = tuple(str(item) for item in argv)
-        self.calls.append(items)
-        return CommandResult(argv=items, returncode=1, stderr="refused")
 
 
 @contextmanager
 def local_tz(name: str) -> Iterator[None]:
-    """Run a block with the process's local timezone forced to ``name``.
-
-    Schedules are local wall clock, so the tests that prove it have to control
-    what "local" means rather than inherit the build machine's zone.
-    """
     previous = os.environ.get("TZ")
     os.environ["TZ"] = name
     time.tzset()
@@ -100,47 +34,54 @@ def local_tz(name: str) -> Iterator[None]:
 
 
 def local_moment(text: str) -> datetime:
-    """Parse ``YYYY-MM-DD HH:MM`` as a local wall-clock instant."""
     return datetime.strptime(text, "%Y-%m-%d %H:%M").astimezone()
 
 
-@dataclass
-class Tree:
-    """A temporary automations repository plus its state directory."""
-
-    root: Path
-    state: Path
-
-    @property
-    def manifest_path(self) -> Path:
-        return self.root / "manifest.toml"
-
-    def write_manifest(self, text: str) -> None:
-        self.manifest_path.write_text(text, encoding="utf-8")
-
-    def write_runners(self, text: str) -> None:
-        (self.root / "runners.toml").write_text(text, encoding="utf-8")
-
-    def write_task(self, name: str, text: str) -> Path:
-        path = self.root / "tasks" / f"{name}.toml"
-        path.write_text(text, encoding="utf-8")
-        return path
-
-    def write_prompt(self, name: str, text: str) -> Path:
-        path = self.root / "prompts" / f"{name}.md"
-        path.write_text(text, encoding="utf-8")
-        return path
-
-    def load(self, host: str = HOST) -> Automations:
-        return load(manifest_path=self.manifest_path, host=host, env={})
+@pytest.fixture
+def runner() -> CliRunner:
+    return CliRunner()
 
 
 @pytest.fixture
-def tree(tmp_path: Path) -> Tree:
-    root = tmp_path / "automations"
-    (root / "tasks").mkdir(parents=True)
-    (root / "prompts").mkdir(parents=True)
-    built = Tree(root=root, state=tmp_path / "state")
-    built.write_manifest(MANIFEST)
-    built.write_runners(RUNNERS)
-    return built
+def isolated_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, str]]:
+    config, state, units, home = (
+        tmp_path / "config home",
+        tmp_path / "state home",
+        tmp_path / "units",
+        tmp_path / "home",
+    )
+    home.mkdir()
+    env = {
+        "XDG_CONFIG_HOME": str(config),
+        "XDG_STATE_HOME": str(state),
+        "AUTOMATIONCTL_BACKEND": "systemd",
+        "AUTOMATIONCTL_UNIT_DIR": str(units),
+        "HOME": str(home),
+    }
+    recorder = RecordingRunner()
+    original = backends.create
+
+    def recorded(name: str, **kwargs: object) -> backends.Backend:
+        kwargs["runner"] = recorder
+        return original(name, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(backends, "create", recorded)
+    yield env
+
+
+def write_task(
+    path: Path, name: str, *, command: str = '["/bin/echo", "ok"]', extra: str = ""
+) -> Path:
+    path.write_text(
+        "\n".join(
+            [
+                "schema_version = 2",
+                f'name = "{name}"',
+                'description = "test task"',
+                f"command = {command}",
+                extra,
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path

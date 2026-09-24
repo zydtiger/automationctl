@@ -1,47 +1,23 @@
-"""The launchd LaunchAgent backend.
-
-Generated plists are dumb: ``ProgramArguments`` starts ``automationctl exec``
-and a start condition expresses the schedule. Because launchd has no
-randomized-delay control and does not replay runs missed across power-off, the
-plists pass ``--jitter`` where the spec asks for it and hosts with persistent
-calendar work get one extra ``automationctl.catchup`` agent that runs at load.
-"""
+"""launchd rendering for installed standalone tasks."""
 
 from __future__ import annotations
 
 import os
 import plistlib
-from collections.abc import Callable, Collection, Mapping, Sequence
-from pathlib import Path
-from types import MappingProxyType
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from .. import catchup, records
-from ..commands import CommandResult, CommandRunner
-from ..config import Automations
-from ..errors import BackendError
+from .. import records
+from ..commands import CommandResult
 from ..schedule import to_launchd
-from ..spec import TaskSpec, effective_randomized_delay
+from ..spec import MachinePolicy, TaskSpec
 from . import GENERATED_HEADER, Backend, HealthCheck
 
-LABEL_PREFIX = "automationctl."
-PLIST_SUFFIX = ".plist"
-CATCHUP_LABEL = "automationctl.catchup"
-LAUNCHCTL = "launchctl"
-
-#: Changing the system timezone re-points this symlink, and launchd's
-#: ``WatchPaths`` fires on the change. It is the only timezone signal launchd
-#: offers; there is no equivalent for a clock step, which is what the optional
-#: ``catchup_sweep`` interval exists to bound.
-LOCALTIME_PATH = "/etc/localtime"
-
-#: launchctl's exit code for "could not find service" — a definite "not loaded".
-#: Every other failure, 127 (launchctl absent) included, means "unknown".
-NOT_FOUND_RETURNCODE = 113
+LABEL_PREFIX, PLIST_SUFFIX, CATCHUP_LABEL = "automationctl.", ".plist", "automationctl.catchup"
 
 
-def label_for(task: str) -> str:
-    return f"{LABEL_PREFIX}{task}"
+def label_for(name: str) -> str:
+    return f"{LABEL_PREFIX}{name}"
 
 
 def plist_name(label: str) -> str:
@@ -49,64 +25,41 @@ def plist_name(label: str) -> str:
 
 
 def dump_plist(data: dict[str, Any]) -> str:
-    """Serialize a plist dictionary to XML text with a generated-file marker."""
-    xml = plistlib.dumps(data, sort_keys=True).decode("utf-8")
-    marker = f"<!-- {GENERATED_HEADER} -->\n"
-    head, sep, tail = xml.partition("\n")
-    if not sep:  # pragma: no cover - plistlib always emits multiple lines
-        return marker + xml
-    return f"{head}\n{marker}{tail}"
+    xml = plistlib.dumps(data, sort_keys=True).decode()
+    first, separator, rest = xml.partition("\n")
+    return f"{first}\n<!-- {GENERATED_HEADER} -->\n{rest}" if separator else xml
 
 
 class LaunchdBackend(Backend):
-    """Compiles task specs into launchd user agents."""
-
     name = "launchd"
 
-    def __init__(
-        self,
-        *,
-        unit_dir: Path,
-        runner: CommandRunner,
-        executable: str,
-        manifest_path: Path,
-        state_dir: Path,
-        uid: int | None = None,
-    ) -> None:
-        super().__init__(
-            unit_dir=unit_dir,
-            runner=runner,
-            executable=executable,
-            manifest_path=manifest_path,
-            state_dir=state_dir,
-        )
-        self.uid = uid if uid is not None else os.getuid()
+    def __init__(self, *args: object, uid: int | None = None, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.uid = os.getuid() if uid is None else uid
 
     @property
     def domain(self) -> str:
         return f"gui/{self.uid}"
 
-    def service_target(self, label: str) -> str:
+    def target(self, label: str) -> str:
         return f"{self.domain}/{label}"
-
-    # -- rendering ---------------------------------------------------------
-
-    def is_managed(self, filename: str) -> bool:
-        return filename.startswith(LABEL_PREFIX) and filename.endswith(PLIST_SUFFIX)
 
     def task_filenames(self, task: TaskSpec) -> tuple[str, ...]:
         return (plist_name(label_for(task.name)),)
 
-    def render_task(self, automations: Automations, task: TaskSpec) -> str:
-        # Jitter spreads scheduled starts. A task with no schedule only ever
-        # runs because someone asked for it now, and `submit` must be immediate
-        # on both platforms, so an unscheduled agent never carries --jitter.
-        jitter = (
-            task.schedule is not None and effective_randomized_delay(automations.manifest, task) > 0
-        )
+    def possible_task_filenames(self, name: str) -> tuple[str, ...]:
+        return (plist_name(label_for(name)),)
+
+    def _environment(self) -> dict[str, str]:
+        return {"XDG_CONFIG_HOME": str(self.config_home), "XDG_STATE_HOME": str(self.state_home)}
+
+    def desired_task_files(self, task: TaskSpec) -> dict[str, str]:
         data: dict[str, Any] = {
             "Label": label_for(task.name),
-            "ProgramArguments": self.exec_argv(task, host=automations.host, jitter=jitter),
+            "ProgramArguments": self.exec_argv(
+                task, jitter=task.schedule is not None and task.jitter_seconds > 0
+            ),
+            "EnvironmentVariables": self._environment(),
             "ProcessType": "Background",
             "RunAtLoad": False,
         }
@@ -118,64 +71,27 @@ class LaunchdBackend(Backend):
                 data["StartCalendarInterval"] = dict(timing.start_calendar_interval[0])
             else:
                 data["StartCalendarInterval"] = [
-                    dict(entry) for entry in timing.start_calendar_interval
+                    dict(item) for item in timing.start_calendar_interval
                 ]
-        return dump_plist(data)
+        return {plist_name(label_for(task.name)): dump_plist(data)}
 
-    def render_catchup(self, automations: Automations) -> str:
-        """Render the one agent that recovers occurrences launchd will not replay.
-
-        ``RunAtLoad`` covers power-off, ``WatchPaths`` covers a timezone
-        change, and the optional sweep covers what is left: launchd exposes no
-        clock-step event at all, so a bounded interval is the only way to put
-        an upper bound on how long a stepped clock can hide a missed run. It
-        is off unless the manifest asks for it, because polling is a cost the
-        design does not pay by default.
-        """
+    def desired_catchup_files(self, policy: MachinePolicy) -> dict[str, str]:
         data: dict[str, Any] = {
             "Label": CATCHUP_LABEL,
-            "ProgramArguments": self.catchup_argv(host=automations.host),
+            "ProgramArguments": self.catchup_argv(),
+            "EnvironmentVariables": self._environment(),
             "ProcessType": "Background",
             "RunAtLoad": True,
-            "WatchPaths": [LOCALTIME_PATH],
+            "WatchPaths": ["/etc/localtime"],
         }
-        sweep = automations.manifest.defaults.catchup_sweep_seconds
-        if sweep is not None:
-            data["StartInterval"] = sweep
-        return dump_plist(data)
-
-    def desired_files(self, automations: Automations, tasks: Sequence[TaskSpec]) -> dict[str, str]:
-        files: dict[str, str] = {}
-        for task in tasks:
-            name = plist_name(label_for(task.name))
-            if name == plist_name(CATCHUP_LABEL):
-                # lint reserves the name; refuse rather than silently drop the
-                # task by overwriting it with the catch-up agent below.
-                raise BackendError(
-                    f"task {task.name!r} collides with the reserved {CATCHUP_LABEL} agent"
-                )
-            files[name] = self.render_task(automations, task)
-        if catchup.triggers_wanted(automations, tasks):
-            files[plist_name(CATCHUP_LABEL)] = self.render_catchup(automations)
-        return files
-
-    # -- substrate operations ---------------------------------------------
+        if policy.catchup_sweep_seconds is not None:
+            data["StartInterval"] = policy.catchup_sweep_seconds
+        return {plist_name(CATCHUP_LABEL): dump_plist(data)}
 
     def _launchctl(self, *args: str) -> CommandResult:
-        return self.runner.run([LAUNCHCTL, *args])
-
-    def _label_of(self, filename: str) -> str:
-        return filename[: -len(PLIST_SUFFIX)]
+        return self.runner.run(["launchctl", *args])
 
     def _domain_gate(self) -> Callable[[], bool]:
-        """Return a "is the domain reachable?" probe memoized for one verb.
-
-        launchctl reports "could not find service" for a label in a domain it
-        cannot reach as readily as for a label that genuinely is not loaded,
-        so 113 only means "not loaded" if the domain itself answers. The probe
-        is lazy and runs at most once per verb: nothing pays for it unless a
-        113 actually turns up.
-        """
         answer: list[bool] = []
 
         def reachable() -> bool:
@@ -186,115 +102,92 @@ class LaunchdBackend(Backend):
         return reachable
 
     def _load_state(self, label: str, domain_ok: Callable[[], bool] | None = None) -> bool | None:
-        """Read-only probe: ``True`` loaded, ``False`` not loaded, ``None`` unknown.
-
-        Only launchctl's own "could not find service" code — and only when the
-        domain is reachable — is read as a definite no. Any other failure, and
-        any 113 from a domain that will not answer, is *unknown*, and callers
-        must not mistake unknown for "there is nothing to stop": that turns a
-        broken substrate into a silent success. The probe's own result is
-        never reported as an operation, since asking a question is not a
-        control command.
-        """
-        result = self._launchctl("print", self.service_target(label))
+        result = self._launchctl("print", self.target(label))
         if result.ok:
             return True
-        if result.returncode == NOT_FOUND_RETURNCODE:
-            gate = domain_ok if domain_ok is not None else self._domain_gate()
-            return False if gate() else None
+        if result.returncode == 113:
+            return False if (domain_ok or self._domain_gate())() else None
         return None
 
-    def activate(
-        self,
-        automations: Automations,
-        tasks: Sequence[TaskSpec],
-        desired: Mapping[str, str] = MappingProxyType({}),
-        rewritten: Collection[str] = (),
+    def _activate_label(
+        self, label: str, desired: Mapping[str, str], rewritten: set[str]
     ) -> list[CommandResult]:
-        """Re-assert the domain's view of every desired agent.
-
-        ``enable`` runs for all of them, because that is what clears a
-        ``pause`` and makes "install re-asserts the repository state" true.
-        The disruptive part — bootout followed by bootstrap — runs for agents
-        whose definition differs from the one launchd last accepted, and for
-        those whose file this reconcile just rewrote. Both signals are needed:
-        the hash catches an activation that never landed, and ``rewritten``
-        catches a plist that drifted on disk and was reloaded behind our back.
-        Everything else is left alone, and is bootstrapped only if it is not
-        loaded.
-        """
-        results: list[CommandResult] = []
+        filename, target = plist_name(label), self.target(label)
         activated = records.read_activation(self.state_dir, self.name)
-        domain_ok = self._domain_gate()
-        labels = [label_for(task.name) for task in tasks]
-        if catchup.triggers_wanted(automations, tasks):
-            labels.append(CATCHUP_LABEL)
-        for label in labels:
-            target = self.service_target(label)
-            filename = plist_name(label)
-            path = self.unit_dir / filename
-            content = desired.get(filename)
-            wanted = records.content_hash(content) if content is not None else None
-            stale = wanted is None or activated.get(label) != wanted or filename in rewritten
-
-            results.append(self._launchctl("enable", target))
-            state = self._load_state(label, domain_ok)
-            # An unknown state is booted out for the same reason deactivate
-            # does it: a redundant bootout is cheap, and skipping one because
-            # the probe could not answer leaves a stale definition running.
-            if (stale or state is None) and state is not False:
-                results.append(self._launchctl("bootout", target))
-                state = False
-            if state is not True:
-                started = self._launchctl("bootstrap", self.domain, str(path))
-                results.append(started)
-                if started.ok and wanted is not None:
-                    activated[label] = wanted
-            elif wanted is not None:
-                activated[label] = wanted
+        wanted = records.content_hash(desired[filename])
+        results = [self._launchctl("enable", target)]
+        if not results[0].ok:
+            return results
+        state = self._load_state(label, self._domain_gate())
+        stale = activated.get(label) != wanted or filename in rewritten
+        if (stale or state is None) and state is not False:
+            stopped = self._launchctl("bootout", target)
+            results.append(stopped)
+            if not stopped.ok:
+                return results
+            state = False
+        if state is not True:
+            started = self._launchctl("bootstrap", self.domain, str(self.unit_dir / filename))
+            results.append(started)
+            if not started.ok:
+                return results
+        activated[label] = wanted
         records.write_activation(self.state_dir, self.name, activated)
         return results
 
-    def deactivate(self, filenames: Sequence[str]) -> list[CommandResult]:
-        """Unload the agents behind the given generated files.
+    def activate(
+        self, task: TaskSpec, desired: Mapping[str, str], rewritten: set[str]
+    ) -> list[CommandResult]:
+        if task.disabled:
+            return self.pause(task)
+        return self._activate_label(label_for(task.name), desired, rewritten)
 
-        A label the probe cannot speak for is booted out anyway: leaving an
-        agent bootstrapped against a plist we are about to delete is worse
-        than a redundant ``bootout``, and the command's own result decides
-        whether the verb succeeded.
-        """
+    def activate_catchup(
+        self, desired: Mapping[str, str], rewritten: set[str]
+    ) -> list[CommandResult]:
+        if plist_name(CATCHUP_LABEL) not in desired:
+            return []
+        return self._activate_label(CATCHUP_LABEL, desired, rewritten)
+
+    def deactivate(self, filenames: Sequence[str]) -> list[CommandResult]:
         results: list[CommandResult] = []
-        activated = records.read_activation(self.state_dir, self.name)
+        activation = records.read_activation(self.state_dir, self.name)
         domain_ok = self._domain_gate()
         for filename in filenames:
-            label = self._label_of(filename)
-            if self._load_state(label, domain_ok) is False:
-                activated.pop(label, None)
+            if not filename.endswith(PLIST_SUFFIX):
                 continue
-            stopped = self._launchctl("bootout", self.service_target(label))
+            label = filename[: -len(PLIST_SUFFIX)]
+            if self._load_state(label, domain_ok) is False:
+                activation.pop(label, None)
+                continue
+            stopped = self._launchctl("bootout", self.target(label))
             results.append(stopped)
             if stopped.ok:
-                activated.pop(label, None)
-        records.write_activation(self.state_dir, self.name, activated)
+                activation.pop(label, None)
+            else:
+                break
+        records.write_activation(self.state_dir, self.name, activation)
         return results
 
     def submit(self, task: TaskSpec) -> list[CommandResult]:
-        return [self._launchctl("kickstart", "-k", self.service_target(label_for(task.name)))]
+        return [self._launchctl("kickstart", "-k", self.target(label_for(task.name)))]
 
     def pause(self, task: TaskSpec) -> list[CommandResult]:
-        target = self.service_target(label_for(task.name))
+        if task.schedule is None:
+            return []
+        label = label_for(task.name)
+        target = self.target(label)
         results = [self._launchctl("disable", target)]
-        if not results[0].ok:
-            return results
-        if self._load_state(label_for(task.name)) is False:
+        if not results[0].ok or self._load_state(label) is False:
             return results
         results.append(self._launchctl("bootout", target))
         return results
 
     def resume(self, task: TaskSpec) -> list[CommandResult]:
+        if task.schedule is None:
+            return []
         label = label_for(task.name)
-        path = self.unit_dir / plist_name(label)
-        target = self.service_target(label)
+        target = self.target(label)
         results = [self._launchctl("enable", target)]
         if not results[0].ok:
             return results
@@ -306,67 +199,21 @@ class LaunchdBackend(Backend):
             results.append(stopped)
             if not stopped.ok:
                 return results
-        results.append(self._launchctl("bootstrap", self.domain, str(path)))
+        results.append(
+            self._launchctl("bootstrap", self.domain, str(self.unit_dir / plist_name(label)))
+        )
         return results
 
     def enabled(self, task: TaskSpec) -> bool | None:
-        if task.schedule is None:
-            return None
-        return self._load_state(label_for(task.name))
+        return None if task.schedule is None else self._load_state(label_for(task.name))
 
     def follow_argv(self, task: TaskSpec) -> tuple[str, ...] | None:
         return None
 
     def health(self) -> list[HealthCheck]:
-        domain = self._launchctl("print", self.domain)
+        result = self._launchctl("print", self.domain)
         return [
             HealthCheck(
-                "backend",
-                domain.ok,
-                f"launchd domain {self.domain}"
-                + ("" if domain.ok else f" unreachable: {domain.stderr.strip()}"),
+                "backend", result.ok, result.stdout.strip() or result.stderr.strip() or "unknown"
             )
         ]
-
-    def catchup_health(
-        self, automations: Automations, tasks: Sequence[TaskSpec]
-    ) -> list[HealthCheck]:
-        if not catchup.triggers_wanted(automations, tasks):
-            return [
-                HealthCheck(
-                    "catch-up triggers",
-                    True,
-                    "not needed: no calendar occurrence a clock or timezone jump can lose",
-                )
-            ]
-        path = self.unit_dir / plist_name(CATCHUP_LABEL)
-        if not path.is_file():
-            return [
-                HealthCheck(
-                    "catch-up triggers",
-                    False,
-                    f"{path} is missing; run automationctl install",
-                )
-            ]
-        # Probe the plist on disk, not the manifest's wishes: an upgraded tool
-        # or an edited sweep leaves the installed agent stale until `install`
-        # rewrites it, and that is exactly when a false green would hide it.
-        try:
-            installed = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            return [HealthCheck("catch-up triggers", False, f"{path} is unreadable: {exc}")]
-        if installed != self.render_catchup(automations):
-            return [
-                HealthCheck(
-                    "catch-up triggers",
-                    False,
-                    f"{path} is stale; run automationctl install",
-                )
-            ]
-        sweep = automations.manifest.defaults.catchup_sweep_seconds
-        # There is no clock-step event to probe for, so the report says which
-        # triggers this agent actually carries and leaves the operator to judge
-        # whether the sweep is worth its cost on this machine.
-        detail = f"{CATCHUP_LABEL} watches {LOCALTIME_PATH} and runs at load"
-        detail += f", sweeping every {sweep}s" if sweep is not None else "; no sweep configured"
-        return [HealthCheck("catch-up triggers", True, detail)]

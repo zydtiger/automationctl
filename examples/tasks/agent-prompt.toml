@@ -1,0 +1,14 @@
+schema_version = 2
+name = "agent-prompt"
+description = "An agent task whose source prompt is copied during installation"
+command = ["example-agent", "--print"]
+stdin_file = "../prompts/agent-prompt.md"
+cwd = "~/projects/example"
+path_prepend = ["~/.local/bin"]
+schedule = "daily 03:00"
+timeout = "30m"
+on_failure = ["notify:desktop"]
+
+[notify.desktop]
+type = "command"
+command = ["notify-send", "{title}", "{body}"]

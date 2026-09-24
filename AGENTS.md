@@ -7,8 +7,8 @@
   on macOS, executed through a short-lived per-run wrapper, with no resident
   daemon.
 - Read `docs/DESIGN.md` before implementation work. It is the authoritative
-  design contract: architecture decisions D1–D8, configuration schema, exec
-  lifecycle, and milestones M0–M4.
+  design contract for the standalone-task configuration schema and execution
+  lifecycle.
 - Keep the repository self-contained and public-ready at all times: no
   personal paths, host names, private repository references, or
   machine-specific defaults in code, tests, examples, or documentation.
@@ -16,13 +16,14 @@
 ## Layout
 
 - `src/automationctl/` — the package: CLI, spec models, backends, exec wrapper.
-- `tests/` — pytest suite; backend rendering is verified with golden files.
+- `tests/` — pytest suite; backend rendering and lifecycle are verified without a live scheduler.
 - `docs/DESIGN.md` — design contract.
 - `examples/` — generic sample automations layout (arrives with M0).
 
 ## Setup and Commands
 
 - `uv sync` — create or refresh the development environment.
+- `uv tool install prek` — install the hook runner once per machine.
 - `prek install` — one-time per clone; installs the Git hooks defined in
   `.pre-commit-config.yaml`. `uv` and `prek` are per-machine prerequisites
   and are not declared as project dependencies.
@@ -31,12 +32,11 @@
 ## Validation
 
 - Full: `prek run --all-files && prek run --all-files --hook-stage pre-push`
-- Targeted: `uv run pytest tests/<file>` or a `::<test>` selector.
-- Mechanical scope — lint, format, types, file hygiene — is defined solely by
-  `.pre-commit-config.yaml`; do not restate those commands or their scopes
-  elsewhere.
-- Tests run from the same file as a `pre-push` stage hook, so the commit
-  stage stays fast and the test command has a single definition.
+- Targeted: `prek run --files <changed-path>... && prek run --files <changed-path>... --hook-stage pre-push`
+- Documentation-only: `prek run --files <changed-document-path>... && git diff --check -- <changed-document-path>...`
+- `.pre-commit-config.yaml` is the sole definition of mechanical commands and
+  their scope. Its `commit-msg` hook validates commit subjects separately from
+  source-file validation.
 - CI (`.github/workflows/ci.yml`) invokes the hook runner rather than
   restating hook commands. A `lint` job runs the commit-stage hooks once,
   and a matrixed `test` job runs the pre-push stage on every supported
@@ -50,7 +50,8 @@
 - Small focused changes commit directly to `main`. Substantial or multi-commit
   work uses a short-lived `<prefix>/<task-name>` branch merged back to `main`.
 - Commit subjects: `prefix: concise imperative summary`, no trailing period,
-  no scopes. Allowed prefixes:
+  no scopes; Git-generated merge subjects beginning with `Merge ` are the only
+  exception. Allowed prefixes:
   - `feat` — functionality
   - `fix` — correctness
   - `docs` — documentation

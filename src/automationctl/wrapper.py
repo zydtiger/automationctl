@@ -1,9 +1,4 @@
-"""The ``exec`` lifecycle: the only nontrivial runtime code in the tool.
-
-Everything platform-divergent lives here — environment construction, named
-locks, timeout enforcement, tee logging, summary extraction, run records, and
-failure notification — so that generated units and plists stay dumb.
-"""
+"""The short-lived standalone-task execution wrapper."""
 
 from __future__ import annotations
 
@@ -26,31 +21,10 @@ from typing import IO, Any, TextIO
 
 from . import paths, records
 from .commands import CommandRunner
-from .config import Automations, load_prompt
 from .errors import AutomationctlError, ConfigError, LockBusy
 from .locks import named_lock, run_lock
 from .notify import HttpSender, NotifyEvent, NotifyOutcome, dispatch, transport_name
-from .records import (
-    STATUS_ERROR,
-    STATUS_FAILED,
-    STATUS_OK,
-    STATUS_SKIPPED,
-    STATUS_TIMEOUT,
-    STDERR_FILE,
-    STDOUT_FILE,
-    create_run_dir,
-    isoformat,
-    new_run_id,
-    utcnow,
-    write_meta,
-)
-from .spec import (
-    TaskSpec,
-    effective_on_failure,
-    effective_persistent,
-    effective_randomized_delay,
-    effective_timeout,
-)
+from .spec import TaskSpec, effective_persistent
 from .template import build_invocation, builtin_values
 
 BASE_ENV_KEYS = (
@@ -78,90 +52,56 @@ STDERR_TAIL_BYTES = 64 * 1024
 NOTIFY_SUMMARY_BYTES = 64 * 1024
 
 
-def effective_snapshot(automations: Automations, task: TaskSpec) -> dict[str, Any]:
-    """Return the task fields after manifest defaults have been applied.
-
-    A run record has to answer "why did this task time out after 30 minutes"
-    even when the spec says nothing about a timeout, so the resolved values go
-    in beside the raw spec snapshot.
-    """
-    return {
-        "timeout_seconds": effective_timeout(automations.manifest, task),
-        "on_failure": list(effective_on_failure(automations.manifest, task)),
-        "randomized_delay_seconds": effective_randomized_delay(automations.manifest, task),
-        "persistent": effective_persistent(automations.manifest, task),
-    }
-
-
 def tool_version() -> str:
     try:
         return version("automationctl")
-    except PackageNotFoundError:  # pragma: no cover - only when running uninstalled
+    except PackageNotFoundError:
         return "unknown"
 
 
 def parse_env_file(path: Path) -> dict[str, str]:
-    """Parse a ``KEY=value`` environment file, ignoring comments and blanks."""
-    values: dict[str, str] = {}
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise ConfigError(f"cannot read env file: {exc}", path) from exc
-    for number, raw in enumerate(text.splitlines(), start=1):
+    values: dict[str, str] = {}
+    for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         if line.startswith("export "):
-            line = line[len("export ") :].strip()
+            line = line[7:].strip()
         key, separator, value = line.partition("=")
         if not separator or not key.strip():
             raise ConfigError(f"invalid env file line {number}: {raw!r}", path)
-        cleaned = value.strip()
-        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
-            cleaned = cleaned[1:-1]
-        values[key.strip()] = cleaned
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        values[key.strip()] = value
     return values
 
 
 def build_env(
-    automations: Automations,
-    task: TaskSpec,
-    ambient: Mapping[str, str],
-    run_dir: Path,
-    *,
-    strict: bool = True,
+    task: TaskSpec, ambient: Mapping[str, str], run_dir: Path, *, strict: bool = True
 ) -> dict[str, str]:
-    """Build the child environment: minimal base, path_prepend, env files, task env.
-
-    ``strict=False`` skips unreadable env files instead of failing. It is for
-    callers that only want to see the environment a run *would* get — `doctor`
-    probing PATH, and the failure-notification path, which must still deliver
-    an alert when the very problem being reported is a missing env file.
-    """
-    env: dict[str, str] = {key: ambient[key] for key in BASE_ENV_KEYS if key in ambient}
+    env = {key: ambient[key] for key in BASE_ENV_KEYS if key in ambient}
     env.setdefault("HOME", str(Path.home()))
-
-    prepend = [str(paths.expand(item)) for item in automations.host_config.path_prepend]
-    env["PATH"] = os.pathsep.join([*prepend, DEFAULT_PATH]) if prepend else DEFAULT_PATH
-
-    for item in (*automations.host_config.env_files, *task.env_files):
+    prepended = [str(paths.expand(value)) for value in task.path_prepend]
+    env["PATH"] = os.pathsep.join([*prepended, DEFAULT_PATH]) if prepended else DEFAULT_PATH
+    for value in task.env_files:
         try:
-            env.update(parse_env_file(paths.expand(item)))
+            env.update(parse_env_file(paths.expand(value)))
         except ConfigError:
             if strict:
                 raise
-
     env.update(task.env)
     env["AUTOMATIONCTL_TASK"] = task.name
     env["AUTOMATIONCTL_RUN_DIR"] = str(run_dir)
-    env["AUTOMATIONCTL_HOST"] = automations.host
     return env
 
 
 @dataclass
 class ExecOptions:
-    """Injectable surroundings for one ``exec`` invocation."""
-
     state_dir: Path
     hostname: str
     env: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
@@ -175,16 +115,14 @@ class ExecOptions:
     notify_runner: CommandRunner | None = None
 
     def out(self) -> TextIO:
-        return self.stdout if self.stdout is not None else sys.stdout
+        return self.stdout or sys.stdout
 
     def err(self) -> TextIO:
-        return self.stderr if self.stderr is not None else sys.stderr
+        return self.stderr or sys.stderr
 
 
 @dataclass(frozen=True)
 class ExecResult:
-    """What one ``exec`` invocation did."""
-
     task: str
     status: str
     exit_code: int
@@ -200,13 +138,6 @@ class ExecResult:
 
 
 def _write_stdin(handle: IO[bytes], payload: bytes) -> None:
-    """Feed the prompt to the child from its own thread.
-
-    A prompt larger than the pipe buffer blocks until the child reads it, and
-    an unattended agent that never reads stdin would otherwise hold the
-    wrapper hostage past its own timeout. Writing off-thread keeps the
-    deadline enforceable; the write simply fails once the child is killed.
-    """
     try:
         handle.write(payload)
         handle.flush()
@@ -218,16 +149,9 @@ def _write_stdin(handle: IO[bytes], payload: bytes) -> None:
 
 
 def _pump(source: IO[bytes], sink: Path, passthrough: TextIO) -> None:
-    descriptor = os.open(
-        sink,
-        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-        records.PRIVATE_FILE_MODE,
-    )
+    descriptor = os.open(sink, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, records.PRIVATE_FILE_MODE)
     with os.fdopen(descriptor, "wb") as handle:
-        while True:
-            chunk = source.readline()
-            if not chunk:
-                break
+        while chunk := source.readline():
             handle.write(chunk)
             handle.flush()
             passthrough.write(chunk.decode("utf-8", "replace"))
@@ -236,38 +160,26 @@ def _pump(source: IO[bytes], sink: Path, passthrough: TextIO) -> None:
 
 @contextmanager
 def _run_locks(state_dir: Path, task: TaskSpec) -> Iterator[None]:
-    """Hold the implicit run lock, and the named lock when the spec declares one.
-
-    The run lock spans the whole exec lifecycle and is what makes two triggers
-    that genuinely overlap in time — a ``Persistent=`` replay racing a boot
-    catch-up while a long agent task is still going — produce one run and one
-    skip. The named lock is a separate concern: it excludes *other* tasks
-    sharing a resource, and a task that declares none still may not run twice
-    at once.
-    """
     with run_lock(state_dir / "locks", task.name):
         if task.lock is None:
             yield
-            return
-        with named_lock(state_dir / "locks", task.lock):
-            yield
+        else:
+            with named_lock(state_dir / "locks", task.lock):
+                yield
 
 
 def _terminate(process: subprocess.Popen[bytes], grace: float) -> None:
-    """SIGTERM the child's process group, then SIGKILL after the grace period."""
     for signal_number in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(process.pid, signal_number)
         except (ProcessLookupError, PermissionError):
-            try:
+            with suppress(ProcessLookupError):
                 process.send_signal(signal_number)
-            except ProcessLookupError:
-                return
         try:
-            process.wait(timeout=grace if signal_number == signal.SIGTERM else 5.0)
+            process.wait(timeout=grace if signal_number == signal.SIGTERM else 5)
             return
         except subprocess.TimeoutExpired:
-            continue
+            pass
 
 
 def _probe_version(program: str, env: Mapping[str, str]) -> str | None:
@@ -284,12 +196,12 @@ def _probe_version(program: str, env: Mapping[str, str]) -> str | None:
         return None
     if completed.returncode != 0:
         return None
-    first = (completed.stdout or completed.stderr or "").strip().splitlines()
-    return first[0][:200] if first else None
+    lines = (completed.stdout or completed.stderr or "").strip().splitlines()
+    return lines[0][:200] if lines else None
 
 
-def _tail(path: Path, lines: int) -> str:
-    return "\n".join(records.tail_lines(path, lines, max_bytes=STDERR_TAIL_BYTES))
+def _tail(path: Path) -> str:
+    return "\n".join(records.tail_lines(path, STDERR_TAIL_LINES, max_bytes=STDERR_TAIL_BYTES))
 
 
 def _read_result(run_dir: Path) -> str:
@@ -304,32 +216,26 @@ def _read_result(run_dir: Path) -> str:
     if data is None:
         return ""
     summary = data.get("summary")
-    if isinstance(summary, str):
-        return summary.strip()
-    return json.dumps(data, sort_keys=True)[:500]
+    return summary.strip() if isinstance(summary, str) else json.dumps(data, sort_keys=True)[:500]
 
 
-def _notify_env(
-    automations: Automations,
-    task: TaskSpec,
-    options: ExecOptions,
-    run_dir: Path,
-) -> Mapping[str, str]:
-    """Return the environment notification transports resolve variables from.
+def _effective(task: TaskSpec) -> dict[str, Any]:
+    return {
+        "timeout_seconds": task.timeout_seconds,
+        "on_failure": list(task.on_failure),
+        "jitter_seconds": task.jitter_seconds,
+        "persistent": effective_persistent(task),
+    }
 
-    Notification credentials — an ntfy URL, a webhook token — live in
-    ``env_files`` alongside the run's other secrets, never in the ambient
-    environment of a timer-started process. Notify therefore reads the same
-    environment the child would have received.
-    """
+
+def _notify_env(task: TaskSpec, options: ExecOptions, run_dir: Path) -> Mapping[str, str]:
     try:
-        return build_env(automations, task, options.env, run_dir, strict=False)
+        return build_env(task, options.env, run_dir, strict=False)
     except AutomationctlError:
         return options.env
 
 
 def _finalize(
-    automations: Automations,
     task: TaskSpec,
     options: ExecOptions,
     meta: dict[str, Any],
@@ -340,18 +246,18 @@ def _finalize(
     exit_code: int,
     reason: str = "",
 ) -> ExecResult:
-    finished = utcnow()
+    finished = records.utcnow()
     duration = (finished - started).total_seconds()
     meta.update(
         {
             "status": status,
             "exit_code": exit_code,
-            "finished_at": isoformat(finished),
+            "finished_at": records.isoformat(finished),
             "duration_seconds": round(duration, 3),
             "reason": reason,
         }
     )
-    write_meta(run_dir, meta)
+    records.write_meta(run_dir, meta)
     records.write_last(
         options.state_dir,
         task.name,
@@ -365,101 +271,78 @@ def _finalize(
             "finished_at": meta["finished_at"],
             "duration_seconds": meta["duration_seconds"],
             "host": options.hostname,
-            "schedule": task.schedule.text if task.schedule is not None else None,
+            "schedule": task.schedule.text if task.schedule else None,
         },
     )
-
     outcomes: tuple[NotifyOutcome, ...] = ()
-    if status in records.FAILURE_STATUSES:
-        references = effective_on_failure(automations.manifest, task)
-        if references:
-            body_parts = [
-                f"task: {task.name}",
-                f"host: {options.hostname}",
-                f"status: {status}",
-                f"exit: {exit_code}",
-                f"duration: {duration:.1f}s",
-                f"run: {run_dir}",
-            ]
-            if reason:
-                body_parts.append(f"reason: {reason}")
-            summary = _read_result(run_dir)
-            if summary:
-                body_parts.append(f"summary: {summary}")
-            tail = _tail(run_dir / STDERR_FILE, STDERR_TAIL_LINES)
-            if tail:
-                body_parts.append("stderr tail:\n" + tail)
-            event = NotifyEvent(
-                task=task.name,
-                status=status,
-                exit_code=exit_code,
-                title=f"automationctl: {task.name} {status}",
-                body="\n".join(body_parts),
-                run_dir=str(run_dir),
-            )
+    if status in records.FAILURE_STATUSES and task.on_failure:
+        body_parts = [
+            f"task: {task.name}",
+            f"host: {options.hostname}",
+            f"status: {status}",
+            f"exit: {exit_code}",
+            f"duration: {duration:.1f}s",
+            f"run: {run_dir}",
+        ]
+        if reason:
+            body_parts.append(f"reason: {reason}")
+        if summary := _read_result(run_dir):
+            body_parts.append(f"summary: {summary}")
+        if tail := _tail(run_dir / records.STDERR_FILE):
+            body_parts.append("stderr tail:\n" + tail)
+        event = NotifyEvent(
+            task.name,
+            status,
+            exit_code,
+            f"automationctl: {task.name} {status}",
+            "\n".join(body_parts),
+            str(run_dir),
+        )
+        delivered: list[NotifyOutcome] = []
+        for reference in task.on_failure:
             try:
-                outcomes = tuple(
+                delivered.extend(
                     dispatch(
-                        references,
-                        automations.manifest,
+                        [reference],
+                        task.notify,
                         event,
-                        env=_notify_env(automations, task, options, run_dir),
+                        env=_notify_env(task, options, run_dir),
                         runner=options.notify_runner,
                         sender=options.notify_sender,
                     )
                 )
             except Exception as exc:
-                # The invariant, not a substitute for the precise handling
-                # inside send(): no notification transport may ever destroy a
-                # run's exit code or its record. Transports reach arbitrary
-                # third-party code — HTTP stacks, hook programs — and the set
-                # of exceptions that can come back is not enumerable.
-                outcomes = tuple(
+                delivered.append(
                     NotifyOutcome(
                         transport_name(reference) or reference,
                         False,
                         f"transport raised {type(exc).__name__}: {exc}",
                     )
-                    for reference in references
                 )
-            meta["notifications"] = [
-                {"transport": item.transport, "ok": item.ok, "detail": item.detail}
-                for item in outcomes
-            ]
-            write_meta(run_dir, meta)
-
-    return ExecResult(
-        task=task.name,
-        status=status,
-        exit_code=exit_code,
-        run_id=run_id,
-        run_dir=run_dir,
-        duration_seconds=duration,
-        reason=reason,
-        notifications=outcomes,
-    )
+        outcomes = tuple(delivered)
+        meta["notifications"] = [
+            {"transport": item.transport, "ok": item.ok, "detail": item.detail} for item in outcomes
+        ]
+        records.write_meta(run_dir, meta)
+    return ExecResult(task.name, status, exit_code, run_id, run_dir, duration, reason, outcomes)
 
 
-def _run_summary_cmd(
-    task: TaskSpec,
-    run_dir: Path,
-    env: Mapping[str, str],
-    meta: dict[str, Any],
-) -> None:
+def _summary(task: TaskSpec, run_dir: Path, env: Mapping[str, str], meta: dict[str, Any]) -> None:
     if task.summary_cmd is None:
         return
-    try:
-        stdout_text = (run_dir / STDOUT_FILE).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        stdout_text = ""
+    output = (
+        (run_dir / records.STDOUT_FILE).read_text(encoding="utf-8", errors="replace")
+        if (run_dir / records.STDOUT_FILE).exists()
+        else ""
+    )
     try:
         completed = subprocess.run(
-            list(task.summary_cmd),
-            input=stdout_text,
+            task.summary_cmd,
+            input=output,
             capture_output=True,
             text=True,
             env=dict(env),
-            cwd=str(run_dir),
+            cwd=run_dir,
             timeout=120,
             check=False,
         )
@@ -467,67 +350,63 @@ def _run_summary_cmd(
         meta["summary_error"] = str(exc)
         return
     meta["summary_exit_code"] = completed.returncode
-    output = (completed.stdout or "").strip()
-    payload: dict[str, Any]
+    text = (completed.stdout or "").strip()
     try:
-        parsed = json.loads(output)
+        result = json.loads(text)
     except json.JSONDecodeError:
-        payload = {"summary": output}
-    else:
-        payload = parsed if isinstance(parsed, dict) else {"summary": parsed}
-    records.write_json(run_dir / records.RESULT_FILE, payload)
+        result = {"summary": text}
+    records.write_json(
+        run_dir / records.RESULT_FILE, result if isinstance(result, dict) else {"summary": result}
+    )
 
 
-def exec_task(automations: Automations, task: TaskSpec, options: ExecOptions) -> ExecResult:
-    """Run one task through the full wrapper lifecycle."""
-    started = utcnow()
-    run_id = new_run_id(started)
-    run_dir = create_run_dir(options.state_dir, task.name, run_id)
+def exec_task(task: TaskSpec, options: ExecOptions) -> ExecResult:
+    started = records.utcnow()
+    run_id = records.new_run_id(started)
+    run_dir = records.create_run_dir(options.state_dir, task.name, run_id)
     meta: dict[str, Any] = {
         "task": task.name,
         "run_id": run_id,
         "run_dir": str(run_dir),
         "host": options.hostname,
-        "manifest": str(automations.manifest.path),
         "tool_version": tool_version(),
         "spec": task.snapshot(),
-        "effective": effective_snapshot(automations, task),
-        "started_at": isoformat(started),
+        "effective": _effective(task),
+        "started_at": records.isoformat(started),
         "status": "running",
     }
-    write_meta(run_dir, meta)
-
-    delay = effective_randomized_delay(automations.manifest, task) if options.jitter else 0
-    if delay > 0:
-        waited = random.uniform(0, delay)
-        meta["jitter_seconds"] = round(waited, 3)
-        options.sleeper(waited)
-
-    try:
-        with _run_locks(options.state_dir, task):
-            return _execute(automations, task, options, meta, run_dir, run_id, started)
-    except LockBusy as exc:
+    records.write_meta(run_dir, meta)
+    if task.disabled:
         return _finalize(
-            automations,
             task,
             options,
             meta,
             run_dir,
             run_id,
             started,
-            STATUS_SKIPPED,
+            records.STATUS_SKIPPED,
             0,
-            reason=str(exc),
+            "task is disabled",
+        )
+    if options.jitter and task.jitter_seconds:
+        delay = random.uniform(0, task.jitter_seconds)
+        meta["jitter_seconds"] = round(delay, 3)
+        options.sleeper(delay)
+    try:
+        with _run_locks(options.state_dir, task):
+            return _execute(task, options, meta, run_dir, run_id, started)
+    except LockBusy as exc:
+        return _finalize(
+            task, options, meta, run_dir, run_id, started, records.STATUS_SKIPPED, 0, str(exc)
         )
     except AutomationctlError as exc:
         options.err().write(f"automationctl: {exc}\n")
         return _finalize(
-            automations, task, options, meta, run_dir, run_id, started, STATUS_ERROR, 1, str(exc)
+            task, options, meta, run_dir, run_id, started, records.STATUS_ERROR, 1, str(exc)
         )
 
 
 def _execute(
-    automations: Automations,
     task: TaskSpec,
     options: ExecOptions,
     meta: dict[str, Any],
@@ -535,37 +414,26 @@ def _execute(
     run_id: str,
     started: datetime,
 ) -> ExecResult:
-    env = build_env(automations, task, options.env, run_dir)
-    prompt = load_prompt(automations.manifest, task)
-    runner = automations.runners.get(task.runner) if task.runner is not None else None
-    if task.runner is not None and runner is None:
-        raise ConfigError(f"unknown runner: {task.runner}", task.path)
-
-    values = builtin_values(
-        task=task.name, hostname=options.hostname, run_dir=str(run_dir), now=started
+    env = build_env(task, options.env, run_dir)
+    invocation = build_invocation(
+        task, builtin_values(task.name, options.hostname, str(run_dir), started)
     )
-    invocation = build_invocation(task, runner, prompt, values)
     meta["argv"] = list(invocation.argv)
-    meta["stdin"] = "prompt" if invocation.stdin_text is not None else None
-
-    cwd = paths.expand(task.cwd) if task.cwd else Path.cwd()
+    meta["stdin"] = "inline" if invocation.stdin_text is not None else None
+    cwd = paths.expand(task.cwd) if task.cwd else Path(env["HOME"])
     if not cwd.is_dir():
         raise ConfigError(f"cwd does not exist: {cwd}", task.path)
     meta["cwd"] = str(cwd)
-
     program = invocation.argv[0]
     resolved = program if os.sep in program else shutil.which(program, path=env["PATH"])
     if resolved is None:
         raise ConfigError(f"command not found on PATH: {program}", task.path)
     meta["program"] = resolved
-
-    timeout = effective_timeout(automations.manifest, task)
-    meta["timeout_seconds"] = timeout
-
+    meta["timeout_seconds"] = task.timeout_seconds
     try:
         process = subprocess.Popen(
             [resolved, *invocation.argv[1:]],
-            cwd=str(cwd),
+            cwd=cwd,
             env=env,
             stdin=subprocess.PIPE if invocation.stdin_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -574,63 +442,42 @@ def _execute(
         )
     except OSError as exc:
         raise ConfigError(f"cannot start {resolved}: {exc}", task.path) from exc
-
-    assert process.stdout is not None
-    assert process.stderr is not None
+    assert process.stdout is not None and process.stderr is not None
     pumps = [
         threading.Thread(
-            target=_pump, args=(process.stdout, run_dir / STDOUT_FILE, options.out()), daemon=True
+            target=_pump,
+            args=(process.stdout, run_dir / records.STDOUT_FILE, options.out()),
+            daemon=True,
         ),
         threading.Thread(
-            target=_pump, args=(process.stderr, run_dir / STDERR_FILE, options.err()), daemon=True
+            target=_pump,
+            args=(process.stderr, run_dir / records.STDERR_FILE, options.err()),
+            daemon=True,
         ),
     ]
     for pump in pumps:
         pump.start()
-
-    writer: threading.Thread | None = None
+    writer = None
     if invocation.stdin_text is not None and process.stdin is not None:
         writer = threading.Thread(
-            target=_write_stdin,
-            args=(process.stdin, invocation.stdin_text.encode("utf-8")),
-            daemon=True,
+            target=_write_stdin, args=(process.stdin, invocation.stdin_text.encode()), daemon=True
         )
         writer.start()
-
-    status = STATUS_OK
+    status = records.STATUS_OK
     reason = ""
     try:
-        exit_code = process.wait(timeout=timeout)
+        exit_code = process.wait(timeout=task.timeout_seconds)
     except subprocess.TimeoutExpired:
         _terminate(process, options.kill_grace)
         exit_code = process.returncode if process.returncode is not None else -signal.SIGKILL
-        status = STATUS_TIMEOUT
-        reason = f"timed out after {timeout}s"
-
+        status, reason = records.STATUS_TIMEOUT, f"timed out after {task.timeout_seconds}s"
     for pump in pumps:
         pump.join(timeout=10)
     if writer is not None:
         writer.join(timeout=10)
-
-    if status != STATUS_TIMEOUT and exit_code != 0:
-        status = STATUS_FAILED
-        reason = f"exited {exit_code}"
-
-    _run_summary_cmd(task, run_dir, env, meta)
-    if options.capture_versions:
-        probed = _probe_version(resolved, env)
-        if probed is not None:
-            meta["program_version"] = probed
-
-    return _finalize(
-        automations,
-        task,
-        options,
-        meta,
-        run_dir,
-        run_id,
-        started,
-        status,
-        exit_code,
-        reason,
-    )
+    if status != records.STATUS_TIMEOUT and exit_code != 0:
+        status, reason = records.STATUS_FAILED, f"exited {exit_code}"
+    _summary(task, run_dir, env, meta)
+    if options.capture_versions and (version_text := _probe_version(resolved, env)):
+        meta["program_version"] = version_text
+    return _finalize(task, options, meta, run_dir, run_id, started, status, exit_code, reason)

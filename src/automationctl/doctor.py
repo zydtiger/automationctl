@@ -1,90 +1,41 @@
-"""Read-only host probes.
-
-The two predictable first-day failures of an unattended automation system are
-PATH (agent CLIs invisible to non-interactive contexts) and environment
-(missing proxy or token variables). ``doctor`` checks both before any timer
-ever fires, and never mutates anything.
-"""
+"""Read-only diagnostics for installed tasks and their scheduler substrate."""
 
 from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Mapping
+import socket
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import paths
+from . import catchup, paths, records
 from .backends import Backend, HealthCheck
-from .config import Automations, load_prompt
 from .errors import AutomationctlError
-from .records import utcnow
-from .spec import TaskSpec
+from .spec import MachinePolicy, TaskSpec
 from .template import build_invocation, builtin_values
-from .wrapper import DEFAULT_PATH, build_env
+from .wrapper import build_env
 
 
 @dataclass(frozen=True)
 class DoctorReport:
-    """Everything ``doctor`` observed."""
-
-    checks: tuple[HealthCheck, ...] = ()
+    checks: tuple[HealthCheck, ...]
 
     @property
     def ok(self) -> bool:
         return all(check.ok for check in self.checks)
 
 
-def effective_path(automations: Automations, task: TaskSpec, env: Mapping[str, str]) -> str:
-    """Return the PATH this task's child would actually receive.
-
-    It has to come from the same builder the wrapper uses, because an env file
-    is allowed to set PATH — and if doctor guesses instead, it reports on an
-    environment no run will ever have.
-    """
-    probe = build_env(automations, task, env, Path("<doctor>"), strict=False)
-    return probe.get("PATH", DEFAULT_PATH)
-
-
-def _resolve(program: str, search_path: str) -> str | None:
-    """Resolve a program the way the wrapper will, absolute paths included."""
-    if os.sep in program:
-        return program if os.access(program, os.X_OK) else None
-    return shutil.which(program, path=search_path)
-
-
-def _programs(automations: Automations, task: TaskSpec) -> list[str]:
-    values = builtin_values(
-        task=task.name, hostname=automations.host, run_dir="<run-dir>", now=utcnow()
-    )
-    runner = automations.runners.get(task.runner) if task.runner is not None else None
-    try:
-        prompt = load_prompt(automations.manifest, task)
-        invocation = build_invocation(task, runner, prompt, values)
-    except AutomationctlError:
-        return []
-    programs = [invocation.argv[0]] if invocation.argv else []
-    if task.summary_cmd:
-        programs.append(task.summary_cmd[0])
-    return programs
-
-
 def _state_dir_check(state_dir: Path) -> HealthCheck:
-    """Report whether runtime state can be written without creating anything."""
     if os.path.lexists(state_dir):
-        if not state_dir.is_dir():
-            return HealthCheck("state dir", False, f"{state_dir} exists but is not a directory")
-        writable = os.access(state_dir, os.W_OK | os.X_OK)
+        writable = state_dir.is_dir() and os.access(state_dir, os.W_OK | os.X_OK)
         return HealthCheck(
             "state dir",
             writable,
-            (
-                f"{state_dir} writable and searchable"
-                if writable
-                else f"{state_dir} is not writable and searchable"
-            ),
+            f"{state_dir} writable and searchable"
+            if writable
+            else f"{state_dir} is not a writable directory",
         )
-
     parent = state_dir.parent
     while not os.path.lexists(parent) and parent != parent.parent:
         parent = parent.parent
@@ -92,99 +43,84 @@ def _state_dir_check(state_dir: Path) -> HealthCheck:
     return HealthCheck(
         "state dir",
         writable,
-        (
-            f"{state_dir} is absent; lazy creation is available under writable parent {parent}"
-            if writable
-            else f"{state_dir} is absent and cannot be created under {parent}"
-        ),
+        f"{state_dir} is absent; lazy creation is available under {parent}"
+        if writable
+        else f"{state_dir} cannot be created under {parent}",
     )
+
+
+def _catchup_check(
+    tasks: Sequence[TaskSpec], policy: MachinePolicy, backend: Backend
+) -> HealthCheck:
+    if not catchup.triggers_wanted(tasks):
+        return HealthCheck("catch-up triggers", True, "not needed")
+    desired = backend.desired_catchup_files(policy)
+    for name, content in desired.items():
+        path = backend.unit_dir / name
+        try:
+            installed = path.read_text(encoding="utf-8")
+        except OSError:
+            return HealthCheck("catch-up triggers", False, f"{path} is missing")
+        if installed != content:
+            return HealthCheck("catch-up triggers", False, f"{path} is stale")
+    return HealthCheck("catch-up triggers", True, "installed and current")
 
 
 def run(
-    automations: Automations,
+    tasks: Sequence[TaskSpec],
+    errors: Sequence[Exception],
     backend: Backend,
     *,
-    env: Mapping[str, str],
+    policy: MachinePolicy,
     state_dir: Path,
+    env: Mapping[str, str],
 ) -> DoctorReport:
-    """Probe the backend, the manifest, the environment, and required binaries."""
-    manifest = automations.manifest
-    tasks = automations.enabled_tasks()
-
-    checks: list[HealthCheck] = list(backend.health())
-    checks.extend(backend.catchup_health(automations, tasks))
-
-    checks.append(
-        HealthCheck(
-            "manifest",
-            True,
-            f"{manifest.path} (schema {manifest.schema_version}, host {automations.host}, "
-            f"{len(tasks)} enabled task(s))",
-        )
-    )
-    checks.append(
-        HealthCheck(
-            "host",
-            automations.host_declared,
-            "declared in the manifest"
-            if automations.host_declared
-            else f"host {automations.host!r} has no [hosts.*] section",
-        )
-    )
-    if automations.errors:
-        for error in automations.errors:
-            checks.append(HealthCheck("spec", False, str(error)))
-
-    for item in (*automations.host_config.env_files, *_task_env_files(tasks)):
-        path = paths.expand(item)
-        checks.append(
-            HealthCheck(
-                "env file",
-                os.access(path, os.R_OK),
-                f"{path} readable" if os.access(path, os.R_OK) else f"{path} missing or unreadable",
-            )
-        )
-
+    checks = list(backend.health())
+    checks.extend(HealthCheck("spec", False, str(error)) for error in errors)
     checks.append(_state_dir_check(state_dir))
-
-    # Keyed on the search path as well as the name: PATH is per task now, so
-    # the same program can resolve differently — or not at all — for two tasks.
+    catchup_checks = backend.catchup_health(tasks, policy)
+    checks.extend(catchup_checks or [_catchup_check(tasks, policy, backend)])
     seen: set[tuple[str, str]] = set()
     for task in tasks:
-        search_path = effective_path(automations, task, env)
-        for program in _programs(automations, task):
-            if (program, search_path) in seen:
-                continue
-            seen.add((program, search_path))
-            found = _resolve(program, search_path)
-            # Attributed to the task, because two tasks can probe the same
-            # program name against different PATHs and get different answers.
+        runtime = build_env(task, env, Path("<doctor-run>"), strict=False)
+        for item in task.env_files:
+            path = paths.expand(item)
             checks.append(
                 HealthCheck(
-                    "binary",
-                    found is not None,
-                    f"{task.name}: {program} -> {found}"
-                    if found
-                    else f"{task.name}: {program} not found or not executable",
+                    "env file",
+                    path.is_file() and os.access(path, os.R_OK),
+                    f"{task.name}: {path}",
                 )
             )
-        if task.cwd:
-            directory = paths.expand(task.cwd)
-            checks.append(
-                HealthCheck(
-                    "cwd",
-                    directory.is_dir(),
-                    f"{task.name}: {directory}"
-                    if directory.is_dir()
-                    else f"{task.name}: {directory} does not exist",
-                )
+        cwd = paths.expand(task.cwd) if task.cwd else Path(runtime["HOME"])
+        checks.append(HealthCheck("cwd", cwd.is_dir(), f"{task.name}: {cwd}"))
+        try:
+            program = build_invocation(
+                task,
+                builtin_values(
+                    task.name,
+                    socket.gethostname().split(".")[0],
+                    "<doctor-run>",
+                    records.utcnow(),
+                ),
+            ).argv[0]
+        except AutomationctlError as exc:
+            checks.append(HealthCheck("binary", False, f"{task.name}: cannot build command: {exc}"))
+            continue
+        search_path = runtime["PATH"]
+        if (program, search_path) in seen:
+            continue
+        seen.add((program, search_path))
+        found = (
+            Path(program)
+            if os.sep in program
+            else Path(shutil.which(program, path=search_path) or "")
+        )
+        checks.append(
+            HealthCheck(
+                "binary",
+                bool(found) and found.is_file() and os.access(found, os.X_OK),
+                f"{task.name}: {program} -> {found or 'not found'}",
             )
-
-    return DoctorReport(checks=tuple(checks))
-
-
-def _task_env_files(tasks: list[TaskSpec]) -> list[str]:
-    out: list[str] = []
-    for task in tasks:
-        out.extend(task.env_files)
-    return out
+        )
+    return DoctorReport(tuple(checks))
