@@ -75,13 +75,15 @@ as healthy when its nearest existing parent permits lazy creation.
 ## Development
 
 ```bash
-uv sync
-prek install        # one-time per clone: installs the Git hooks
+uv sync --locked
+uv tool install prek  # once per machine
+prek install          # once per clone
 uv run automationctl --version
-uv run pytest
 ```
 
-`uv` and `prek` are machine prerequisites.
+Run the full, targeted, or documentation-only validation defined in
+`AGENTS.md`; those commands execute the same hook stages as CI. `uv` and `prek`
+are machine prerequisites.
 
 Tests are hermetic: rendering is checked against golden units and plists, the
 wrapper is exercised against stock POSIX tools, and every `systemctl` or
