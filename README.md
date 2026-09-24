@@ -50,11 +50,22 @@ or `~/.local/state/automationctl`.
 ## Development
 
 ```bash
-uv sync
-uv run pytest
-prek run --all-files
-prek run --all-files --hook-stage pre-push
+uv sync --locked
+uv tool install prek  # once per machine
+prek install          # once per clone
+uv run automationctl --version
 ```
 
-The test suite uses recording scheduler commands; it does not access the real
-scheduler, network, or user configuration.
+Run the full, targeted, or documentation-only validation defined in
+`AGENTS.md`; those commands execute the same hook stages as CI. `uv` and `prek`
+are machine prerequisites.
+
+Tests are hermetic: rendering is checked against golden units and plists, the
+wrapper is exercised against stock POSIX tools, and every `systemctl` or
+`launchctl` invocation goes through a command-runner seam that tests replace
+with a recorder. No test touches a real scheduler, the user's state directory,
+or the network.
+
+## License
+
+MIT
