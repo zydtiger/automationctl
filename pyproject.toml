@@ -22,7 +22,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-  "mypy>=1.19,<2",
+  "mypy>=1.19,<3",
   "pytest>=9,<10",
   "ruff>=0.14,<1",
 ]
