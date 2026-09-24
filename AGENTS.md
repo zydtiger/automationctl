@@ -7,8 +7,8 @@
   on macOS, executed through a short-lived per-run wrapper, with no resident
   daemon.
 - Read `docs/DESIGN.md` before implementation work. It is the authoritative
-  design contract: architecture decisions D1–D8, configuration schema, exec
-  lifecycle, and milestones M0–M4.
+  design contract for the standalone-task configuration schema and execution
+  lifecycle.
 - Keep the repository self-contained and public-ready at all times: no
   personal paths, host names, private repository references, or
   machine-specific defaults in code, tests, examples, or documentation.
@@ -16,7 +16,7 @@
 ## Layout
 
 - `src/automationctl/` — the package: CLI, spec models, backends, exec wrapper.
-- `tests/` — pytest suite; backend rendering is verified with golden files.
+- `tests/` — pytest suite; backend rendering and lifecycle are verified without a live scheduler.
 - `docs/DESIGN.md` — design contract.
 - `examples/` — generic sample automations layout (arrives with M0).
 

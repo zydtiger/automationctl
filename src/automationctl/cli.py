@@ -1,9 +1,12 @@
-"""Command-line interface for automationctl."""
+"""Command line for XDG-installed standalone tasks."""
 
+from __future__ import annotations
+
+import difflib
 import os
+import socket
 import subprocess
-import sys
-from dataclasses import dataclass
+from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
@@ -15,40 +18,35 @@ from . import doctor as doctor_module
 from . import lint as lint_module
 from .backends import Backend, ReconcilePlan
 from .commands import CommandResult
-from .config import Automations, load
-from .errors import AutomationctlError
+from .config import (
+    discover_installed,
+    load_installed,
+    load_policy,
+    load_task,
+    management_lock,
+    materialize,
+    task_path,
+    write_installed,
+)
+from .errors import AutomationctlError, ConfigError
 from .schedule import format_duration
-from .spec import TaskSpec
-from .wrapper import ExecOptions, ExecResult, exec_task
+from .schedule import parse as parse_schedule
+from .spec import MachinePolicy, TaskSpec, validate_task_name
+from .wrapper import ExecOptions, exec_task
 
 app = typer.Typer(
-    name="automationctl",
-    help="Agent-neutral automation runner: compile task specs to the platform scheduler.",
-    no_args_is_help=True,
+    name="automationctl", help="Install and run standalone scheduled tasks.", no_args_is_help=True
 )
-
-EXIT_USAGE = 2
-EXIT_FAILURE = 1
-LOG_TAIL_BYTES = 8 * 1024 * 1024
-
-ManifestOption = Annotated[
-    Path | None,
-    typer.Option(
-        "--manifest",
-        help="Path to manifest.toml (default: ./manifest.toml).",
-        envvar=paths.MANIFEST_ENV,
-    ),
-]
-HostOption = Annotated[
-    str | None, typer.Option("--host", help="Host key to use instead of the short hostname.")
-]
-BackendOption = Annotated[
-    str | None, typer.Option("--backend", help="Force a scheduler backend: systemd or launchd.")
-]
+EXIT_USAGE, EXIT_FAILURE = 2, 1
+BackendOption = Annotated[str | None, typer.Option("--backend", help="Force systemd or launchd.")]
 UnitDirOption = Annotated[
-    Path | None,
-    typer.Option("--unit-dir", help="Directory for generated units.", envvar=paths.UNIT_DIR_ENV),
+    Path | None, typer.Option("--unit-dir", help="Generated-artifact directory (testing only).")
 ]
+
+
+def _fail(message: str, code: int = EXIT_USAGE) -> typer.Exit:
+    typer.secho(f"error: {message}", fg=typer.colors.RED, err=True)
+    return typer.Exit(code)
 
 
 def _print_version(value: bool) -> None:
@@ -60,366 +58,423 @@ def _print_version(value: bool) -> None:
 @app.callback()
 def main(
     show_version: Annotated[
-        bool,
-        typer.Option(
-            "--version",
-            callback=_print_version,
-            is_eager=True,
-            help="Show the version and exit.",
-        ),
+        bool, typer.Option("--version", callback=_print_version, is_eager=True)
     ] = False,
 ) -> None:
     """Agent-neutral automation runner."""
 
 
-# ---------------------------------------------------------------------------
-# shared plumbing
-# ---------------------------------------------------------------------------
+def _env() -> dict[str, str]:
+    return dict(os.environ)
 
 
-def _fail(message: str, code: int = EXIT_USAGE) -> typer.Exit:
-    typer.secho(f"error: {message}", fg=typer.colors.RED, err=True)
-    return typer.Exit(code)
-
-
-@dataclass
-class Session:
-    """Everything a command needs after option resolution."""
-
-    automations: Automations
-    backend_name: str
-    backend: Backend
-    state_dir: Path
-    env: dict[str, str]
-
-    def task(self, name: str) -> TaskSpec:
-        try:
-            return self.automations.require_task(name)
-        except AutomationctlError as exc:
-            raise _fail(str(exc)) from exc
-
-
-def _session(
-    manifest: Path | None,
-    host: str | None,
-    backend_name: str | None = None,
-    unit_dir: Path | None = None,
-) -> Session:
-    env = dict(os.environ)
+def _backend(name: str | None, unit_dir: Path | None, env: dict[str, str]) -> tuple[str, Backend]:
     try:
-        automations = load(manifest_path=manifest, host=host, env=env)
-        name = backend_name or backends.default_backend_name(env)
-        backend = backends.create(
-            name,
-            manifest_path=automations.manifest.path,
-            unit_dir=unit_dir,
-            state_dir=paths.state_dir(env),
-            env=env,
-        )
-    except AutomationctlError as exc:
+        backend_name = name or backends.default_backend_name(env)
+        return backend_name, backends.create(backend_name, unit_dir=unit_dir, env=env)
+    except (ValueError, AutomationctlError) as exc:
         raise _fail(str(exc)) from exc
-    return Session(
-        automations=automations,
-        backend_name=name,
-        backend=backend,
-        state_dir=paths.state_dir(env),
-        env=env,
+
+
+def _hostname() -> str:
+    return socket.gethostname().split(".")[0]
+
+
+def _run(task: TaskSpec, env: dict[str, str], *, jitter: bool) -> int:
+    result = exec_task(
+        task,
+        ExecOptions(state_dir=paths.state_dir(env), hostname=_hostname(), env=env, jitter=jitter),
     )
+    message = (
+        f"{result.task}: {result.status} (exit {result.exit_code}, "
+        f"{result.duration_seconds:.1f}s, {result.run_dir})"
+        + (f"; {result.reason}" if result.reason else "")
+    )
+    typer.echo(message, err=True)
+    return 128 + abs(result.exit_code) if result.exit_code < 0 else result.exit_code
 
 
-def _lint_or_exit(session: Session, tasks: list[str] | None = None) -> None:
-    report = lint_module.lint(session.automations, backend=session.backend_name, tasks=tasks)
+def _report(results: Sequence[CommandResult]) -> None:
+    failed = [result for result in results if not result.ok]
+    for result in failed:
+        typer.secho(
+            f"warning: {result.display} exited {result.returncode}: {result.stderr.strip()}",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+    if failed:
+        raise _fail(f"{len(failed)} scheduler command(s) failed", EXIT_FAILURE)
+
+
+def _render(plan: ReconcilePlan, *, show_diff: bool) -> None:
+    if not plan.has_changes:
+        typer.echo("no generated artifact changes")
+    for change in plan.changed:
+        typer.echo(f"{change.action}: {change.path}")
+        if show_diff and change.diff:
+            typer.echo(change.diff.rstrip())
+
+
+def _lint(task: TaskSpec, policy: MachinePolicy, backend_name: str) -> None:
+    report = lint_module.lint_task(task, policy, backend_name)
     for line in report.render():
         typer.echo(line, err=not report.ok)
     if not report.ok:
         raise _fail(f"lint found {len(report.errors)} error(s)", EXIT_FAILURE)
 
 
-def _require_declared_host(session: Session) -> None:
-    """Refuse to reconcile for a host the manifest does not declare.
-
-    An undeclared host selects no tasks, so a reconcile would compute an empty
-    desired state and garbage-collect every managed unit on the machine. A
-    typo in ``--host`` must not uninstall the installation.
-    """
-    if session.automations.host_declared:
-        return
-    raise _fail(
-        f"host {session.automations.host!r} is not declared in "
-        f"{session.automations.manifest.path}; refusing to reconcile, which would "
-        "remove every managed file. Add a [hosts.*] section or pass --host."
+def _catchup_desired(
+    backend: Backend, policy: MachinePolicy, tasks: dict[str, TaskSpec]
+) -> dict[str, str]:
+    return (
+        backend.desired_catchup_files(policy)
+        if catchup.triggers_wanted(list(tasks.values()))
+        else {}
     )
 
 
-def _require_scheduled_task(task: TaskSpec, verb: str) -> None:
-    """Reject schedule-control verbs for tasks with no schedule to control."""
-    if task.schedule is None:
-        raise _fail(f"cannot {verb} manual task {task.name!r}: task has no schedule")
-
-
-def _exit_code_for(result: ExecResult) -> int:
-    if result.exit_code < 0:
-        return 128 + abs(result.exit_code)
-    return result.exit_code
-
-
-def _run_task(session: Session, task: TaskSpec, *, jitter: bool) -> ExecResult:
-    options = ExecOptions(
-        state_dir=session.state_dir,
-        hostname=session.automations.host,
-        env=session.env,
-        jitter=jitter,
-    )
-    return exec_task(session.automations, task, options)
-
-
-def _report_results(results: list[CommandResult]) -> int:
-    """Report every failed control command and return how many failed."""
-    failures = 0
-    for result in results:
-        if result.ok:
-            continue
-        failures += 1
-        typer.secho(
-            f"warning: {result.display} exited {result.returncode}: {result.stderr.strip()}",
-            fg=typer.colors.YELLOW,
-            err=True,
-        )
-    return failures
-
-
-def _exit_on_substrate_failure(failures: int) -> None:
-    """A scheduler that refused our command left the host in an unknown state."""
-    if failures:
-        raise _fail(f"{failures} scheduler command(s) failed", EXIT_FAILURE)
-
-
-def _print_table(rows: list[tuple[str, ...]]) -> None:
-    widths = [max(len(row[index]) for row in rows) for index in range(len(rows[0]))]
-    for row in rows:
-        line = "  ".join(value.ljust(widths[index]) for index, value in enumerate(row))
-        typer.echo(line.rstrip())
-
-
-def _desired_label(task: TaskSpec) -> str:
-    return "disabled" if task.disabled else "enabled"
-
-
-def _substrate_label(session: Session, task: TaskSpec) -> str:
-    filenames = session.backend.task_filenames(task)
-    possible = session.backend.possible_task_filenames(task)
-    existing = {name for name in possible if (session.backend.unit_dir / name).is_file()}
-    if not existing:
-        return "not installed"
-    if any(name not in existing for name in filenames):
-        return "partial"
-    if any(name not in filenames for name in existing):
-        return "stale"
-
+def _install_task(
+    task: TaskSpec,
+    *,
+    replace_existing: bool,
+    dry_run: bool,
+    show_diff: bool,
+    backend_name: str | None,
+    unit_dir: Path | None,
+    env: dict[str, str],
+) -> None:
+    policy = load_policy(env)
+    backend_label, backend = _backend(backend_name, unit_dir, env)
+    task = materialize(task)
+    _lint(task, policy, backend_label)
+    installed, _ = discover_installed(env)
+    target = task_path(task.name, env)
+    if os.path.lexists(target) and not replace_existing:
+        raise _fail(f"task {task.name!r} is already installed; pass --replace to update it")
+    post = dict(installed)
+    post[task.name] = task
+    desired = backend.desired_task_files(task)
+    desired.update(_catchup_desired(backend, policy, post))
+    scope = [*backend.possible_task_filenames(task.name), *backend.desired_catchup_files(policy)]
+    plan = backend.plan(desired, scope)
     try:
-        desired = session.backend.desired_files(session.automations, [task])
-        if any(
-            (session.backend.unit_dir / name).read_text(encoding="utf-8") != desired.get(name)
-            for name in filenames
-        ):
-            return "stale"
-    except (AutomationctlError, OSError, TypeError, ValueError):
-        return "unknown"
-
-    state = session.backend.enabled(task)
-    if state is None:
-        return "installed" if task.schedule is None else "unknown"
-    return "active" if state else "inactive"
-
-
-def _last_columns(session: Session, task: TaskSpec) -> tuple[str, str]:
-    last = records.read_last(session.state_dir, task.name)
-    if last is None:
-        return ("never", "-")
-    started = str(last.get("started_at", "-"))
-    status = str(last.get("status", "unknown"))
-    duration = last.get("duration_seconds")
-    if isinstance(duration, int | float):
-        return (started, f"{status} ({format_duration(int(duration))})")
-    return (started, status)
-
-
-# ---------------------------------------------------------------------------
-# validation and inspection
-# ---------------------------------------------------------------------------
+        before = target.read_text(encoding="utf-8")
+    except OSError:
+        before = ""
+    task_change = "update" if os.path.lexists(target) else "create"
+    typer.echo(f"{task_change}: {target}")
+    if show_diff:
+        typer.echo(
+            "".join(
+                difflib.unified_diff(
+                    before.splitlines(keepends=True),
+                    __import__("automationctl.config", fromlist=["dump_task"])
+                    .dump_task(task)
+                    .splitlines(keepends=True),
+                    fromfile=f"a/{target.name}",
+                    tofile=f"b/{target.name}",
+                )
+            ).rstrip()
+        )
+    _render(plan, show_diff=show_diff)
+    if dry_run:
+        return
+    with management_lock(env):
+        latest, _ = discover_installed(env)
+        if os.path.lexists(task_path(task.name, env)) and not replace_existing:
+            raise _fail(f"task {task.name!r} was installed concurrently; retry with --replace")
+        post = dict(latest)
+        post[task.name] = task
+        desired = backend.desired_task_files(task)
+        desired.update(_catchup_desired(backend, policy, post))
+        plan = backend.plan(desired, scope)
+        _report(backend.apply(plan, desired))
+        write_installed(task, env)
+        _report(backend.reload())
+        rewritten = backend.rewritten(plan)
+        _report(backend.activate(task, desired, rewritten))
+        _report(backend.activate_catchup(desired, rewritten))
+    typer.echo(f"installed {task.name}")
 
 
 @app.command()
 def lint(
-    tasks: Annotated[list[str] | None, typer.Argument(help="Tasks to lint; default all.")] = None,
-    manifest: ManifestOption = None,
-    host: HostOption = None,
+    files: Annotated[
+        list[Path] | None, typer.Argument(help="Source task files; omit to lint installed tasks.")
+    ] = None,
     backend: BackendOption = None,
 ) -> None:
-    """Validate the automations repository against schema and policy."""
-    session = _session(manifest, host, backend)
-    _lint_or_exit(session, tasks or None)
+    """Lint source task files or every installed definition."""
+    env = _env()
+    policy = load_policy(env)
+    backend_name, _ = _backend(backend, None, env)
+    tasks: list[TaskSpec] = []
+    errors: list[Exception] = []
+    if files:
+        for path in files:
+            try:
+                tasks.append(materialize(load_task(path)))
+            except ConfigError as exc:
+                errors.append(exc)
+    else:
+        installed, discovered = discover_installed(env)
+        tasks = list(installed.values())
+        errors.extend(discovered)
+    reports = [lint_module.lint_task(task, policy, backend_name) for task in tasks]
+    for error in errors:
+        typer.echo(f"error: {error}", err=True)
+    for report in reports:
+        for line in report.render():
+            typer.echo(line, err=not report.ok)
+    count = len(errors) + sum(len(report.errors) for report in reports)
+    if count:
+        raise _fail(f"lint found {count} error(s)", EXIT_FAILURE)
     typer.echo("lint: ok")
 
 
-@app.command("list")
-def list_tasks(
-    manifest: ManifestOption = None,
-    host: HostOption = None,
+@app.command()
+def install(
+    file: Annotated[Path, typer.Argument(help="One source task TOML file.")],
+    replace_existing: Annotated[bool, typer.Option("--replace")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    diff: Annotated[bool, typer.Option("--diff")] = False,
     backend: BackendOption = None,
     unit_dir: UnitDirOption = None,
 ) -> None:
-    """List the tasks this host selects with their last recorded outcome."""
-    session = _session(manifest, host, backend, unit_dir)
-    tasks = session.automations.selected_tasks()
-    if not tasks:
-        typer.echo(f"no tasks selected for host {session.automations.host}")
-        return
-    rows: list[tuple[str, ...]] = [("TASK", "SCHEDULE", "DESIRED", "SUBSTRATE", "LAST", "RESULT")]
-    for task in tasks:
-        schedule = task.schedule.text if task.schedule is not None else "manual"
-        rows.append(
-            (
-                task.name,
-                schedule,
-                _desired_label(task),
-                _substrate_label(session, task),
-                *_last_columns(session, task),
-            )
+    """Validate and install one self-contained task."""
+    env = _env()
+    try:
+        task = load_task(file)
+    except ConfigError as exc:
+        raise _fail(str(exc)) from exc
+    _install_task(
+        task,
+        replace_existing=replace_existing,
+        dry_run=dry_run,
+        show_diff=diff,
+        backend_name=backend,
+        unit_dir=unit_dir,
+        env=env,
+    )
+
+
+@app.command()
+def add(
+    name: Annotated[str, typer.Argument(help="Task name.")],
+    command: Annotated[list[str], typer.Argument(help="Command argv; place it after --.")],
+    description: Annotated[str | None, typer.Option("--description")] = None,
+    every: Annotated[str | None, typer.Option("--every")] = None,
+    schedule: Annotated[str | None, typer.Option("--schedule")] = None,
+    cwd: Annotated[Path | None, typer.Option("--cwd")] = None,
+    timeout: Annotated[str | None, typer.Option("--timeout")] = None,
+    stdin: Annotated[str | None, typer.Option("--stdin")] = None,
+    stdin_file: Annotated[Path | None, typer.Option("--stdin-file")] = None,
+    replace_existing: Annotated[bool, typer.Option("--replace")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    diff: Annotated[bool, typer.Option("--diff")] = False,
+    backend: BackendOption = None,
+    unit_dir: UnitDirOption = None,
+) -> None:
+    """Create and install one standalone task."""
+    if every and schedule:
+        raise _fail("--every and --schedule are mutually exclusive")
+    if stdin is not None and stdin_file is not None:
+        raise _fail("--stdin and --stdin-file are mutually exclusive")
+    if not command:
+        raise _fail("COMMAND is required after --")
+    env = _env()
+    fake_path = Path.cwd() / f"{name}.toml"
+    try:
+        validate_task_name(name, fake_path)
+        schedule_value = f"every {every}" if every else schedule
+        parsed = parse_schedule(schedule_value) if schedule_value else None
+        source = TaskSpec(
+            name=name,
+            path=fake_path,
+            description=description or name,
+            command=tuple(command),
+            stdin=stdin,
+            stdin_file=str(stdin_file) if stdin_file else None,
+            cwd=str(paths.expand(cwd or Path.cwd()).resolve()),
+            schedule=parsed,
+            timeout_seconds=None
+            if timeout is None
+            else __import__("automationctl.schedule", fromlist=["parse_duration"]).parse_duration(
+                timeout
+            ),
         )
-    _print_table(rows)
+    except AutomationctlError as exc:
+        raise _fail(str(exc)) from exc
+    _install_task(
+        source,
+        replace_existing=replace_existing,
+        dry_run=dry_run,
+        show_diff=diff,
+        backend_name=backend,
+        unit_dir=unit_dir,
+        env=env,
+    )
+
+
+@app.command("remove")
+def remove_task(
+    name: Annotated[str, typer.Argument(help="Installed task name.")],
+    backend: BackendOption = None,
+    unit_dir: UnitDirOption = None,
+) -> None:
+    """Remove one installed definition and its scheduler artifacts."""
+    env = _env()
+    try:
+        validate_task_name(name, task_path(name, env))
+        policy = load_policy(env)
+    except AutomationctlError as exc:
+        raise _fail(str(exc)) from exc
+    _, scheduler = _backend(backend, unit_dir, env)
+    with management_lock(env):
+        tasks, _ = discover_installed(env)
+        tasks.pop(name, None)
+        desired = _catchup_desired(scheduler, policy, tasks)
+        scope = [*scheduler.possible_task_filenames(name), *scheduler.desired_catchup_files(policy)]
+        plan = scheduler.plan(desired, scope)
+        _report(scheduler.apply(plan, desired))
+        target = task_path(name, env)
+        target.unlink(missing_ok=True)
+        _report(scheduler.reload())
+        _report(scheduler.activate_catchup(desired, scheduler.rewritten(plan)))
+    typer.echo(f"removed {name}")
+
+
+def _installed_or_fail(name: str, env: dict[str, str]) -> TaskSpec:
+    try:
+        return load_installed(name, env)
+    except ConfigError as exc:
+        raise _fail(str(exc)) from exc
+
+
+@app.command()
+def run(
+    name: Annotated[str, typer.Argument()],
+    jitter: Annotated[bool, typer.Option("--jitter")] = False,
+) -> None:
+    raise typer.Exit(_run(_installed_or_fail(name, _env()), _env(), jitter=jitter))
+
+
+@app.command("exec")
+def exec_command(
+    name: Annotated[str, typer.Argument()],
+    jitter: Annotated[bool, typer.Option("--jitter")] = False,
+) -> None:
+    raise typer.Exit(_run(_installed_or_fail(name, _env()), _env(), jitter=jitter))
+
+
+@app.command()
+def submit(
+    name: Annotated[str, typer.Argument()],
+    backend: BackendOption = None,
+    unit_dir: UnitDirOption = None,
+) -> None:
+    env = _env()
+    _, scheduler = _backend(backend, unit_dir, env)
+    task = _installed_or_fail(name, env)
+    _report(scheduler.submit(task))
+    typer.echo(f"submitted {name}")
+
+
+@app.command("catch-up")
+def catch_up(
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False, backend: BackendOption = None
+) -> None:
+    env = _env()
+    backend_name, _ = _backend(backend, None, env)
+    tasks, _ = discover_installed(env)
+    failures = 0
+    for decision in catchup.plan(
+        list(tasks.values()), state_dir=paths.state_dir(env), backend=backend_name
+    ):
+        typer.echo(f"{'due ' if decision.due else 'skip'} {decision.task}: {decision.reason}")
+        if decision.due and not dry_run:
+            code = _run(tasks[decision.task], env, jitter=False)
+            failures += code != 0
+    if failures:
+        raise typer.Exit(EXIT_FAILURE)
+
+
+def _validate_record_name(name: str, env: dict[str, str]) -> None:
+    try:
+        validate_task_name(name, task_path(name, env))
+    except ConfigError as exc:
+        raise _fail(str(exc)) from exc
+
+
+def _substrate_label(task: TaskSpec, scheduler: Backend) -> str:
+    if task.schedule is None:
+        return "manual"
+    enabled = scheduler.enabled(task)
+    return "enabled" if enabled is True else "paused" if enabled is False else "unknown"
+
+
+@app.command("list")
+def list_tasks(backend: BackendOption = None, unit_dir: UnitDirOption = None) -> None:
+    env = _env()
+    _, scheduler = _backend(backend, unit_dir, env)
+    tasks, errors = discover_installed(env)
+    for error in errors:
+        typer.secho(f"warning: {error}", fg=typer.colors.YELLOW, err=True)
+    if not tasks:
+        typer.echo("no installed tasks")
+        return
+    typer.echo("TASK  SCHEDULE  DESIRED  SUBSTRATE  LAST")
+    for task in tasks.values():
+        last = records.read_last(paths.state_dir(env), task.name) or {}
+        schedule = task.schedule.text if task.schedule else "manual"
+        desired = "disabled" if task.disabled else "enabled"
+        typer.echo(
+            f"{task.name}  {schedule}  {desired}  {_substrate_label(task, scheduler)}  "
+            f"{last.get('status', 'never')}"
+        )
 
 
 @app.command()
 def status(
-    task_name: Annotated[str | None, typer.Argument(help="Task to inspect.")] = None,
-    limit: Annotated[int, typer.Option("--limit", "-n", min=1, help="Recent runs to show.")] = 10,
-    manifest: ManifestOption = None,
-    host: HostOption = None,
+    name: Annotated[str | None, typer.Argument()] = None,
+    limit: Annotated[int, typer.Option("--limit", "-n", min=1)] = 10,
     backend: BackendOption = None,
     unit_dir: UnitDirOption = None,
 ) -> None:
-    """Show recent runs, exit codes, and durations."""
-    session = _session(manifest, host, backend, unit_dir)
-    if task_name:
-        names = [task_name]
-    else:
-        names = [task.name for task in session.automations.selected_tasks()]
-    for name in names:
-        task = session.task(name)
-        typer.echo(f"{task.name}: {task.description}")
-        typer.echo(f"  schedule: {task.schedule.text if task.schedule else 'manual'}")
-        typer.echo(f"  desired: {_desired_label(task)}")
-        typer.echo(f"  substrate: {_substrate_label(session, task)}")
-        decision = catchup.decide(
-            session.automations,
-            task,
-            state_dir=session.state_dir,
-            backend=session.backend_name,
-        )
-        typer.echo(f"  catch-up: {'due' if decision.due else 'not due'} ({decision.reason})")
-        runs = records.recent_runs(session.state_dir, name, limit=limit)
+    env = _env()
+    if name is not None:
+        _validate_record_name(name, env)
+    tasks, _ = discover_installed(env)
+    scheduler: Backend | None = None
+    if tasks:
+        _, scheduler = _backend(backend, unit_dir, env)
+    names = [name] if name else sorted(set(tasks) | set(records.known_tasks(paths.state_dir(env))))
+    for item in names:
+        assert item is not None
+        task = tasks.get(item)
+        typer.echo(f"{item}:")
+        if task is not None:
+            assert scheduler is not None
+            schedule = task.schedule.text if task.schedule else "manual"
+            desired = "disabled" if task.disabled else "enabled"
+            decision = catchup.decide(task, state_dir=paths.state_dir(env), backend=scheduler.name)
+            typer.echo(f"  schedule: {schedule}")
+            typer.echo(f"  desired: {desired}")
+            typer.echo(f"  substrate: {_substrate_label(task, scheduler)}")
+            typer.echo(f"  catch-up: {'due' if decision.due else 'not due'} ({decision.reason})")
+        runs = records.recent_runs(paths.state_dir(env), item, limit)
         if not runs:
             typer.echo("  no recorded runs")
-            continue
-        rows: list[tuple[str, ...]] = [("  RUN", "STATUS", "EXIT", "DURATION")]
         for entry in runs:
             duration = (
                 format_duration(int(entry.duration_seconds))
                 if entry.duration_seconds is not None
                 else "-"
             )
-            rows.append(
-                (
-                    f"  {entry.run_id}",
-                    entry.status,
-                    "-" if entry.exit_code is None else str(entry.exit_code),
-                    duration,
-                )
-            )
-        _print_table(rows)
+            typer.echo(f"  {entry.run_id}  {entry.status}  {entry.exit_code}  {duration}")
 
 
-@app.command()
-def logs(
-    task_name: Annotated[str, typer.Argument(help="Task whose logs to show.")],
-    follow: Annotated[bool, typer.Option("--follow", "-f", help="Follow live logs.")] = False,
-    show_stdout: Annotated[bool, typer.Option("--stdout", help="Show stdout only.")] = False,
-    show_stderr: Annotated[bool, typer.Option("--stderr", help="Show stderr only.")] = False,
-    show_both: Annotated[
-        bool, typer.Option("--both", help="Show stdout and stderr as separate sections.")
-    ] = False,
-    lines: Annotated[int, typer.Option("--lines", "-n", min=1, help="Tail this many lines.")] = 200,
-    manifest: ManifestOption = None,
-    host: HostOption = None,
-    backend: BackendOption = None,
-) -> None:
-    """Show the last run's captured output, or follow the substrate's live log."""
-    selectors = [show_stdout, show_stderr, show_both]
-    if sum(selectors) > 1:
-        raise _fail("choose at most one of --stdout, --stderr, or --both")
-    if follow and any(selectors):
-        raise _fail("--stdout, --stderr, and --both cannot be used with --follow")
-    session = _session(manifest, host, backend)
-    task = session.task(task_name)
-    if follow:
-        argv = session.backend.follow_argv(task)
-        if argv is None:
-            raise _fail(f"the {session.backend_name} backend cannot follow live logs")
-        try:
-            code = subprocess.call(list(argv))
-        except OSError as exc:
-            raise _fail(f"cannot follow logs: {argv[0]} is not available: {exc}") from exc
-        raise typer.Exit(code)
-    latest = records.latest_run(session.state_dir, task.name)
-    if latest is None:
-        typer.echo(f"no recorded runs for {task.name}")
-        return
-
-    stdout_path = latest.run_dir / records.STDOUT_FILE
-    stderr_path = latest.run_dir / records.STDERR_FILE
-    stdout_captured = _has_log_output(stdout_path)
-    stderr_captured = _has_log_output(stderr_path)
-
-    if show_both:
-        if not stdout_captured and not stderr_captured:
-            typer.echo(f"no output captured for {task.name} run {latest.run_id}")
-            return
-        if stdout_captured:
-            _show_log(stdout_path, lines)
-        if stderr_captured:
-            _show_log(stderr_path, lines)
-        return
-
-    annotation: str | None = None
-    if show_stdout:
-        path = stdout_path
-    elif show_stderr:
-        path = stderr_path
-    elif latest.status in records.FAILURE_STATUSES and stderr_captured:
-        path = stderr_path
-        annotation = f"auto-selected: run {latest.status}"
-    elif stdout_captured:
-        path = stdout_path
-        if latest.status in records.FAILURE_STATUSES:
-            annotation = "auto-selected: stderr empty"
-    elif stderr_captured:
-        path = stderr_path
-        annotation = "auto-selected: stdout empty"
-    else:
-        typer.echo(f"no output captured for {task.name} run {latest.run_id}")
-        return
-
-    if not _has_log_output(path):
-        typer.echo(f"no output captured at {path}")
-        return
-    _show_log(path, lines, annotation=annotation)
-
-    if not any(selectors):
-        other_path = stderr_path if path == stdout_path else stdout_path
-        if _has_log_output(other_path):
-            option = "--stderr" if other_path == stderr_path else "--stdout"
-            typer.echo(f"note: {other_path.name} also captured; use {option}", err=True)
+LOG_TAIL_BYTES = 8 * 1024 * 1024
 
 
 def _has_log_output(path: Path) -> bool:
@@ -437,238 +492,129 @@ def _show_log(path: Path, lines: int, *, annotation: str | None = None) -> None:
 
 
 @app.command()
-def doctor(
-    manifest: ManifestOption = None,
-    host: HostOption = None,
+def logs(
+    name: Annotated[str, typer.Argument()],
+    lines: Annotated[int, typer.Option("--lines", "-n", min=1)] = 200,
+    show_stdout: Annotated[bool, typer.Option("--stdout")] = False,
+    show_stderr: Annotated[bool, typer.Option("--stderr")] = False,
+    show_both: Annotated[bool, typer.Option("--both")] = False,
+    follow: Annotated[bool, typer.Option("--follow")] = False,
     backend: BackendOption = None,
     unit_dir: UnitDirOption = None,
 ) -> None:
-    """Probe the host for the failures that silently break unattended runs."""
-    session = _session(manifest, host, backend, unit_dir)
-    report = doctor_module.run(
-        session.automations, session.backend, env=session.env, state_dir=session.state_dir
-    )
-    for check in report.checks:
-        mark = "ok  " if check.ok else "FAIL"
-        typer.echo(f"{mark} {check.name}: {check.detail}")
-    if not report.ok:
-        raise typer.Exit(EXIT_FAILURE)
-
-
-# ---------------------------------------------------------------------------
-# execution
-# ---------------------------------------------------------------------------
-
-
-@app.command()
-def run(
-    task_name: Annotated[str, typer.Argument(help="Task to run.")],
-    jitter: Annotated[bool, typer.Option("--jitter", help="Apply randomized_delay first.")] = False,
-    manifest: ManifestOption = None,
-    host: HostOption = None,
-) -> None:
-    """Run a task in the foreground with streaming output."""
-    session = _session(manifest, host)
-    task = session.task(task_name)
-    result = _run_task(session, task, jitter=jitter)
-    typer.echo(
-        f"{result.task}: {result.status} "
-        f"(exit {result.exit_code}, {result.duration_seconds:.1f}s, {result.run_dir})"
-        + (f"; {result.reason}" if result.reason else ""),
-        err=True,
-    )
-    raise typer.Exit(_exit_code_for(result))
-
-
-@app.command("exec")
-def exec_command(
-    task_name: Annotated[str, typer.Argument(help="Task to execute.")],
-    jitter: Annotated[bool, typer.Option("--jitter", help="Apply randomized_delay first.")] = False,
-    manifest: ManifestOption = None,
-    host: HostOption = None,
-) -> None:
-    """Run one task through the wrapper lifecycle; this is what units start."""
-    session = _session(manifest, host)
-    task = session.task(task_name)
-    result = _run_task(session, task, jitter=jitter)
-    raise typer.Exit(_exit_code_for(result))
-
-
-@app.command()
-def submit(
-    task_name: Annotated[str, typer.Argument(help="Task to start now.")],
-    manifest: ManifestOption = None,
-    host: HostOption = None,
-    backend: BackendOption = None,
-    unit_dir: UnitDirOption = None,
-) -> None:
-    """Start a task in the background through the platform scheduler."""
-    session = _session(manifest, host, backend, unit_dir)
-    task = session.task(task_name)
-    failures = _report_results(session.backend.submit(task))
-    _exit_on_substrate_failure(failures)
-    typer.echo(f"submitted {task.name} via {session.backend_name}")
-
-
-@app.command("catch-up")
-def catch_up(
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Only report decisions.")] = False,
-    manifest: ManifestOption = None,
-    host: HostOption = None,
-) -> None:
-    """Run tasks whose scheduled occurrence was missed while the machine was off."""
-    session = _session(manifest, host)
-    decisions = catchup.plan(
-        session.automations, state_dir=session.state_dir, backend=session.backend_name
-    )
-    failures = 0
-    for decision in decisions:
-        marker = "due " if decision.due else "skip"
-        typer.echo(f"{marker} {decision.task}: {decision.reason}")
-        if not decision.due or dry_run:
-            continue
-        result = _run_task(session, session.task(decision.task), jitter=False)
-        typer.echo(
-            f"     {result.task}: {result.status} (exit {result.exit_code})"
-            + (f"; {result.reason}" if result.reason else "")
-        )
-        if result.failed:
-            failures += 1
-    if failures:
-        raise typer.Exit(EXIT_FAILURE)
-
-
-# ---------------------------------------------------------------------------
-# substrate management
-# ---------------------------------------------------------------------------
-
-
-def _render_plan(plan: ReconcilePlan, *, show_diff: bool) -> None:
-    if not plan.has_changes:
-        typer.echo("no changes")
+    if sum((show_stdout, show_stderr, show_both)) > 1:
+        raise _fail("choose at most one of --stdout, --stderr, and --both")
+    env = _env()
+    _validate_record_name(name, env)
+    if follow:
+        if show_stdout or show_stderr or show_both:
+            raise _fail("stream selection cannot be used with --follow")
+        task = _installed_or_fail(name, env)
+        _, scheduler = _backend(backend, unit_dir, env)
+        argv = scheduler.follow_argv(task)
+        if argv is None:
+            raise _fail("backend cannot follow live logs")
+        try:
+            raise typer.Exit(subprocess.call(argv))
+        except FileNotFoundError as exc:
+            raise _fail(f"cannot follow logs: {exc}") from exc
+    latest = records.latest_run(paths.state_dir(env), name)
+    if latest is None:
+        typer.echo(f"no recorded runs for {name}")
         return
-    for change in plan.changed:
-        typer.echo(f"{change.action}: {change.path}")
-        if show_diff and change.diff:
-            typer.echo(change.diff.rstrip("\n"))
-
-
-@app.command()
-def install(
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Show what would change.")] = False,
-    diff: Annotated[bool, typer.Option("--diff", help="Show unified diffs of changes.")] = False,
-    manifest: ManifestOption = None,
-    host: HostOption = None,
-    backend: BackendOption = None,
-    unit_dir: UnitDirOption = None,
-) -> None:
-    """Lint, render, reconcile, and enable this host's generated units."""
-    session = _session(manifest, host, backend, unit_dir)
-    _require_declared_host(session)
-    _lint_or_exit(session, list(session.automations.selected_names()))
-    tasks = session.automations.enabled_tasks()
-    desired = session.backend.desired_files(session.automations, tasks)
-    plan = session.backend.plan(desired)
-    _render_plan(plan, show_diff=diff)
-    if dry_run:
+    stdout_path = latest.run_dir / records.STDOUT_FILE
+    stderr_path = latest.run_dir / records.STDERR_FILE
+    stdout_captured, stderr_captured = _has_log_output(stdout_path), _has_log_output(stderr_path)
+    if show_both:
+        if not stdout_captured and not stderr_captured:
+            typer.echo(f"no output captured for {name} run {latest.run_id}")
+            return
+        if stdout_captured:
+            _show_log(stdout_path, lines)
+        if stderr_captured:
+            _show_log(stderr_path, lines)
         return
-    # Captured before apply(): once the files are written, this reconcile's
-    # own rewrites become invisible, and a backend that reloads selectively
-    # needs to know a drifted file was just put back.
-    rewritten = {
-        change.path.name
-        for change in plan.changed
-        if change.action in {backends.CREATE, backends.UPDATE}
-    }
-    _exit_on_substrate_failure(_report_results(session.backend.apply(plan, desired)))
-    _exit_on_substrate_failure(_report_results(session.backend.reload()))
-    _exit_on_substrate_failure(
-        _report_results(session.backend.activate(session.automations, tasks, desired, rewritten))
-    )
-    typer.echo(f"installed {len(tasks)} task(s) into {session.backend.unit_dir}")
-
-
-@app.command()
-def uninstall(
-    task_name: Annotated[str | None, typer.Argument(help="Task to remove.")] = None,
-    remove_all: Annotated[bool, typer.Option("--all", help="Remove every managed file.")] = False,
-    manifest: ManifestOption = None,
-    host: HostOption = None,
-    backend: BackendOption = None,
-    unit_dir: UnitDirOption = None,
-) -> None:
-    """Remove generated units for one task, or every managed file."""
-    session = _session(manifest, host, backend, unit_dir)
-    if remove_all == (task_name is not None):
-        raise _fail("pass exactly one of a task name or --all")
-    existing = session.backend.existing_files()
-    if remove_all:
-        # No host guard here: --all is an explicit request that names every
-        # file it removes, and it is the right tool for cleaning up a host the
-        # manifest no longer declares.
-        targets = sorted(existing)
+    annotation: str | None = None
+    if show_stdout:
+        path = stdout_path
+    elif show_stderr:
+        path = stderr_path
+    elif latest.status in records.FAILURE_STATUSES and stderr_captured:
+        path, annotation = stderr_path, f"auto-selected: run {latest.status}"
+    elif stdout_captured:
+        path = stdout_path
+        if latest.status in records.FAILURE_STATUSES:
+            annotation = "auto-selected: stderr empty"
+    elif stderr_captured:
+        path, annotation = stderr_path, "auto-selected: stdout empty"
     else:
-        task = session.task(str(task_name))
-        targets = [
-            name for name in session.backend.possible_task_filenames(task) if name in existing
-        ]
-    if not targets:
-        typer.echo("nothing to remove")
+        typer.echo(f"no output captured for {name} run {latest.run_id}")
         return
-    _exit_on_substrate_failure(_report_results(session.backend.deactivate(targets)))
-    for name in targets:
-        (session.backend.unit_dir / name).unlink(missing_ok=True)
-        typer.echo(f"removed: {session.backend.unit_dir / name}")
-    _exit_on_substrate_failure(_report_results(session.backend.reload()))
+    if not _has_log_output(path):
+        typer.echo(f"no output captured at {path}")
+        return
+    _show_log(path, lines, annotation=annotation)
+    if not any((show_stdout, show_stderr, show_both)):
+        other_path = stderr_path if path == stdout_path else stdout_path
+        if _has_log_output(other_path):
+            option = "--stderr" if other_path == stderr_path else "--stdout"
+            typer.echo(f"note: {other_path.name} also captured; use {option}", err=True)
 
 
 @app.command()
 def pause(
-    task_name: Annotated[str, typer.Argument(help="Task to pause.")],
-    manifest: ManifestOption = None,
-    host: HostOption = None,
+    name: Annotated[str, typer.Argument()],
     backend: BackendOption = None,
     unit_dir: UnitDirOption = None,
 ) -> None:
-    """Temporarily stop a task's schedule; the next install restores it."""
-    session = _session(manifest, host, backend, unit_dir)
-    task = session.task(task_name)
-    _require_scheduled_task(task, "pause")
-    _exit_on_substrate_failure(_report_results(session.backend.pause(task)))
-    typer.echo(f"paused {task.name} (temporary; install re-asserts the repository state)")
+    env = _env()
+    task = _installed_or_fail(name, env)
+    if task.schedule is None:
+        raise _fail(f"cannot pause manual task {name!r}")
+    _, scheduler = _backend(backend, unit_dir, env)
+    _report(scheduler.pause(task))
+    typer.echo(f"paused {name}")
 
 
 @app.command()
 def resume(
-    task_name: Annotated[str, typer.Argument(help="Task to resume.")],
-    manifest: ManifestOption = None,
-    host: HostOption = None,
+    name: Annotated[str, typer.Argument()],
     backend: BackendOption = None,
     unit_dir: UnitDirOption = None,
 ) -> None:
-    """Undo a pause."""
-    session = _session(manifest, host, backend, unit_dir)
-    task = session.task(task_name)
-    _require_scheduled_task(task, "resume")
-    _exit_on_substrate_failure(_report_results(session.backend.resume(task)))
-    typer.echo(f"resumed {task.name}")
+    env = _env()
+    task = _installed_or_fail(name, env)
+    if task.schedule is None:
+        raise _fail(f"cannot resume manual task {name!r}")
+    _, scheduler = _backend(backend, unit_dir, env)
+    _report(scheduler.resume(task))
+    typer.echo(f"resumed {name}")
 
 
 @app.command()
-def prune(
-    keep_runs: Annotated[int, typer.Option("--keep-runs", help="Runs to keep per task.")] = 50,
-) -> None:
-    """Delete old run records, keeping the newest per task."""
-    if keep_runs < 0:
-        raise _fail("--keep-runs must not be negative")
-    state_dir = paths.state_dir()
-    removed = records.prune(state_dir, keep_runs)
-    typer.echo(f"pruned {len(removed)} run record(s) under {state_dir}")
+def doctor(backend: BackendOption = None, unit_dir: UnitDirOption = None) -> None:
+    env = _env()
+    _, scheduler = _backend(backend, unit_dir, env)
+    tasks, errors = discover_installed(env)
+    report = doctor_module.run(
+        list(tasks.values()),
+        errors,
+        scheduler,
+        policy=load_policy(env),
+        state_dir=paths.state_dir(env),
+        env=env,
+    )
+    for check in report.checks:
+        typer.echo(f"{'ok  ' if check.ok else 'FAIL'} {check.name}: {check.detail}")
+    if not report.ok:
+        raise typer.Exit(EXIT_FAILURE)
 
 
-def entrypoint() -> None:  # pragma: no cover - console-script shim
-    try:
-        app()
-    except AutomationctlError as exc:
-        typer.secho(f"error: {exc}", fg=typer.colors.RED, err=True)
-        sys.exit(EXIT_USAGE)
+@app.command()
+def prune(keep_runs: Annotated[int, typer.Option("--keep-runs", min=0)] = 50) -> None:
+    removed = records.prune(paths.state_dir(_env()), keep_runs)
+    typer.echo(f"pruned {len(removed)} run(s)")
+
+
+def entrypoint() -> None:
+    app()

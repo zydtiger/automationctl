@@ -1,150 +1,194 @@
-"""Discovery and loading of an automations repository.
-
-An automations repository is a directory containing ``manifest.toml``, an
-optional ``runners.toml``, and a ``tasks/`` directory of task specs. Task
-files that fail to parse are collected rather than raised so that ``lint`` can
-report every problem at once.
-"""
+"""Installed-task discovery, policy loading, and private atomic persistence."""
 
 from __future__ import annotations
 
+import fcntl
 import os
-import socket
-from collections.abc import Mapping
-from dataclasses import dataclass
+import secrets
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
-from . import paths
+from . import paths, records
 from .errors import ConfigError
-from .spec import (
-    HostConfig,
-    Manifest,
-    Runner,
-    TaskSpec,
-    load_toml,
-    parse_manifest,
-    parse_runners,
-    parse_task,
-)
+from .spec import MachinePolicy, TaskSpec, load_toml, parse_policy, parse_task, validate_task_name
 
 
-@dataclass(frozen=True)
-class LoadError:
-    """A task spec that could not be loaded."""
-
-    path: Path
-    message: str
-
-    def __str__(self) -> str:
-        return f"{self.path}: {self.message}"
+def task_path(name: str, env: Mapping[str, str] | None = None) -> Path:
+    validate_task_name(name, paths.tasks_dir(env) / f"{name}.toml")
+    return paths.tasks_dir(env) / f"{name}.toml"
 
 
-@dataclass(frozen=True)
-class Automations:
-    """Everything loaded from one automations repository, for one host."""
-
-    manifest: Manifest
-    runners: Mapping[str, Runner]
-    tasks: Mapping[str, TaskSpec]
-    errors: tuple[LoadError, ...]
-    host: str
-    runners_path: Path
-
-    @property
-    def root(self) -> Path:
-        return self.manifest.root
-
-    @property
-    def host_config(self) -> HostConfig:
-        existing = self.manifest.hosts.get(self.host)
-        return existing if existing is not None else HostConfig(name=self.host)
-
-    @property
-    def host_declared(self) -> bool:
-        return self.host in self.manifest.hosts
-
-    def selected_names(self) -> tuple[str, ...]:
-        """Task names this host selects, in manifest order."""
-        return self.host_config.tasks
-
-    def selected_tasks(self) -> list[TaskSpec]:
-        """Loaded specs this host selects, skipping names that do not resolve."""
-        return [self.tasks[name] for name in self.selected_names() if name in self.tasks]
-
-    def enabled_tasks(self) -> list[TaskSpec]:
-        """Selected specs that are not marked ``disabled``."""
-        return [task for task in self.selected_tasks() if not task.disabled]
-
-    def require_task(self, name: str) -> TaskSpec:
-        task = self.tasks.get(name)
-        if task is None:
-            failed = [error for error in self.errors if error.path.stem == name]
-            if failed:
-                raise ConfigError(failed[0].message, failed[0].path)
-            known = ", ".join(sorted(self.tasks)) or "none"
-            raise ConfigError(f"unknown task: {name} (known tasks: {known})", self.manifest.path)
-        return task
+def load_task(path: Path) -> TaskSpec:
+    return parse_task(load_toml(path), path.resolve())
 
 
-def default_host() -> str:
-    """Return the short hostname, which is the default host key."""
-    return socket.gethostname().split(".")[0]
+def load_installed(name: str, env: Mapping[str, str] | None = None) -> TaskSpec:
+    path = task_path(name, env)
+    task = load_task(path)
+    if task.name != name:
+        raise ConfigError(f"installed filename and task name disagree: {task.name!r}", path)
+    if task.stdin_file is not None:
+        raise ConfigError("installed task must materialize stdin_file as stdin", path)
+    return task
 
 
-def load_prompt(manifest: Manifest, task: TaskSpec) -> str | None:
-    """Return the task's prompt text, reading ``prompt_file`` when configured."""
-    if task.prompt is not None:
-        return task.prompt
-    if task.prompt_file is None:
-        return None
-    path = resolve_repo_path(manifest, task.prompt_file)
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise ConfigError(f"cannot read prompt_file: {exc}", task.path) from exc
-
-
-def resolve_repo_path(manifest: Manifest, value: str) -> Path:
-    """Resolve a path relative to the automations repository root."""
-    expanded = paths.expand(value)
-    if expanded.is_absolute():
-        return expanded
-    return manifest.root / expanded
-
-
-def load(
-    manifest_path: Path | None = None,
-    host: str | None = None,
+def discover_installed(
     env: Mapping[str, str] | None = None,
-) -> Automations:
-    """Load the manifest, runner table, and every task spec."""
-    values = os.environ if env is None else env
-    path = manifest_path if manifest_path is not None else paths.default_manifest_path(values)
-    # Generated units and run records embed this path, so it must be absolute.
-    path = paths.expand(path).resolve()
-    manifest = parse_manifest(load_toml(path), path)
-
-    runners_path = manifest.root / "runners.toml"
-    runners: dict[str, Runner] = {}
-    if runners_path.exists():
-        runners = parse_runners(load_toml(runners_path), runners_path)
-
+) -> tuple[dict[str, TaskSpec], tuple[ConfigError, ...]]:
+    directory = paths.tasks_dir(env)
     tasks: dict[str, TaskSpec] = {}
-    errors: list[LoadError] = []
-    tasks_dir = manifest.root / "tasks"
-    if tasks_dir.is_dir():
-        for spec_path in sorted(tasks_dir.glob("*.toml")):
-            name = spec_path.stem
-            try:
-                tasks[name] = parse_task(load_toml(spec_path), spec_path, name)
-            except ConfigError as exc:
-                errors.append(LoadError(path=spec_path, message=exc.message))
+    errors: list[ConfigError] = []
+    if not directory.is_dir():
+        return tasks, ()
+    for path in sorted(directory.glob("*.toml")):
+        try:
+            task = load_task(path)
+            if task.name != path.stem:
+                raise ConfigError(f"installed filename and task name disagree: {task.name!r}", path)
+            if task.stdin_file is not None:
+                raise ConfigError("installed task must materialize stdin_file as stdin", path)
+            if task.name in tasks:
+                raise ConfigError(f"duplicate installed task name: {task.name}", path)
+            tasks[task.name] = task
+        except ConfigError as exc:
+            errors.append(exc)
+    return tasks, tuple(errors)
 
-    return Automations(
-        manifest=manifest,
-        runners=runners,
-        tasks=tasks,
-        errors=tuple(errors),
-        host=host if host is not None else default_host(),
-        runners_path=runners_path,
-    )
+
+def load_policy(env: Mapping[str, str] | None = None) -> MachinePolicy:
+    path = paths.policy_path(env)
+    if not path.exists():
+        return MachinePolicy(path)
+    return parse_policy(load_toml(path), path)
+
+
+def materialize(task: TaskSpec) -> TaskSpec:
+    """Inline source-local stdin_file before an installed definition is written."""
+    if task.stdin_file is None:
+        return task
+    source = Path(task.stdin_file)
+    source = source if source.is_absolute() else task.path.parent / source
+    try:
+        stdin = source.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"cannot read stdin_file: {exc}", task.path) from exc
+    return replace(task, stdin=stdin, stdin_file=None)
+
+
+def _toml_string(value: str) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _toml_value(value: object) -> str:
+    if isinstance(value, str):
+        return _toml_string(value)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, tuple | list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return (
+            "{ "
+            + ", ".join(
+                f"{_toml_string(str(key))} = {_toml_value(item)}" for key, item in value.items()
+            )
+            + " }"
+        )
+    raise TypeError(f"unsupported TOML value: {value!r}")
+
+
+def dump_task(task: TaskSpec) -> str:
+    """Render a complete self-contained schema-v2 task definition."""
+    values: list[tuple[str, object]] = [
+        ("schema_version", 2),
+        ("name", task.name),
+        ("description", task.description),
+        ("command", task.command),
+    ]
+    if task.stdin is not None:
+        values.append(("stdin", task.stdin))
+    if task.cwd is not None:
+        values.append(("cwd", task.cwd))
+    if task.env:
+        values.append(("env", dict(task.env)))
+    if task.env_files:
+        values.append(("env_files", task.env_files))
+    if task.path_prepend:
+        values.append(("path_prepend", task.path_prepend))
+    if task.schedule is not None:
+        values.append(
+            (
+                "schedule",
+                dict(task.schedule.raw) if task.schedule.kind == "raw" else task.schedule.text,
+            )
+        )
+    if task.timeout_seconds is not None:
+        values.append(("timeout", f"{task.timeout_seconds}s"))
+    if task.jitter_seconds:
+        values.append(("jitter", f"{task.jitter_seconds}s"))
+    if task.persistent is not None:
+        values.append(("persistent", task.persistent))
+    if task.lock is not None:
+        values.append(("lock", task.lock))
+    if task.summary_cmd is not None:
+        values.append(("summary_cmd", task.summary_cmd))
+    if task.on_failure:
+        values.append(("on_failure", task.on_failure))
+    if task.allow_full_access:
+        values.append(("allow_full_access", True))
+    if task.disabled:
+        values.append(("disabled", True))
+    lines = [f"{key} = {_toml_value(value)}" for key, value in values]
+    for name, transport in task.notify.items():
+        lines.extend(
+            ["", f"[notify.{_toml_string(name)}]", f"type = {_toml_value(transport.kind)}"]
+        )
+        if transport.url_env is not None:
+            lines.append(f"url_env = {_toml_value(transport.url_env)}")
+        if transport.command:
+            lines.append(f"command = {_toml_value(transport.command)}")
+        if transport.title is not None:
+            lines.append(f"title = {_toml_value(transport.title)}")
+    return "\n".join(lines) + "\n"
+
+
+def atomic_write(path: Path, text: str) -> None:
+    records.ensure_private_dir(path.parent)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, records.PRIVATE_FILE_MODE)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+        path.chmod(records.PRIVATE_FILE_MODE)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def write_installed(task: TaskSpec, env: Mapping[str, str] | None = None) -> Path:
+    path = task_path(task.name, env)
+    atomic_write(path, dump_task(task))
+    return path
+
+
+@contextmanager
+def management_lock(env: Mapping[str, str] | None = None) -> Iterator[None]:
+    """Serialize add/install/remove after their no-write validation phase."""
+    root = paths.config_dir(env)
+    records.ensure_private_dir(root)
+    lock = root / ".manage.lock"
+    descriptor = os.open(lock, os.O_CREAT | os.O_RDWR, records.PRIVATE_FILE_MODE)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)

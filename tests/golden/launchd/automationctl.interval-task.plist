@@ -3,6 +3,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>XDG_CONFIG_HOME</key>
+		<string>/var/tmp/automationctl-fixture/config home%</string>
+		<key>XDG_STATE_HOME</key>
+		<string>/var/tmp/automationctl-fixture/state home</string>
+	</dict>
 	<key>Label</key>
 	<string>automationctl.interval-task</string>
 	<key>ProcessType</key>
@@ -11,10 +18,6 @@
 	<array>
 		<string>/opt/bin/automationctl</string>
 		<string>exec</string>
-		<string>--manifest</string>
-		<string>/home/example/automations/manifest.toml</string>
-		<string>--host</string>
-		<string>testhost</string>
 		<string>interval-task</string>
 	</array>
 	<key>RunAtLoad</key>

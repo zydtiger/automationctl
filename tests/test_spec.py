@@ -1,165 +1,83 @@
-"""Schema validation for the manifest, runner table, and task specs."""
+"""Schema-v2 task and policy parsing."""
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
 
 import pytest
-from conftest import Tree
 
+from automationctl.config import materialize
 from automationctl.errors import ConfigError
-from automationctl.spec import (
-    TaskSpec,
-    effective_persistent,
-    effective_randomized_delay,
-    effective_timeout,
-    parse_manifest,
-    parse_runners,
-    parse_task,
+from automationctl.spec import load_toml, parse_policy, parse_task
+
+
+def test_schema_v2_requires_name_description_and_command(tmp_path: Path) -> None:
+    path = tmp_path / "task.toml"
+    path.write_text(
+        'schema_version = 2\nname = "x"\ndescription = "x"\ncommand = ["true"]\n', encoding="utf-8"
+    )
+    assert parse_task(load_toml(path), path).name == "x"
+    path.write_text(
+        'schema_version = 1\nname = "x"\ndescription = "x"\ncommand = ["true"]\n', encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="unsupported schema_version"):
+        parse_task(load_toml(path), path)
+
+
+def test_stdin_file_is_materialized_relative_to_its_source_file(tmp_path: Path) -> None:
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text("hello {task}", encoding="utf-8")
+    source = tmp_path / "task.toml"
+    source.write_text(
+        'schema_version = 2\nname = "x"\ndescription = "x"\n'
+        'command = ["true"]\nstdin_file = "prompt.txt"\n',
+        encoding="utf-8",
+    )
+    task = materialize(parse_task(load_toml(source), source))
+    assert task.stdin == "hello {task}" and task.stdin_file is None
+
+
+def test_policy_has_no_task_defaults_or_hosts(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('schema_version = 2\n[lint]\nforbidden_argv = ["x"]\n', encoding="utf-8")
+    assert parse_policy(load_toml(path), path).lint.forbidden_argv == ("x",)
+    path.write_text("schema_version = 2\n[hosts.machine]\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="unknown field"):
+        parse_policy(load_toml(path), path)
+
+
+@pytest.mark.parametrize(
+    ("transport", "message"),
+    [
+        (
+            '[notify.hook]\ntype = "command"\ncommand = ["/bin/true"]\nurl_env = "URL"',
+            "command transport cannot set url_env",
+        ),
+        (
+            '[notify.hook]\ntype = "ntfy"\nurl_env = "URL"\ncommand = ["/bin/true"]',
+            "ntfy transport cannot set command",
+        ),
+    ],
 )
-
-FAKE = Path("/example/manifest.toml")
-
-
-def parse_task_text(text: str, name: str = "sample") -> TaskSpec:
-    return parse_task(tomllib.loads(text), FAKE, name)
-
-
-def test_manifest_round_trip() -> None:
-    manifest = parse_manifest(
-        {
-            "schema_version": 1,
-            "defaults": {"timeout": "30m", "on_failure": ["notify:ntfy"]},
-            "hosts": {"a": {"tasks": ["x"], "path_prepend": ["~/bin"]}},
-            "notify": {"ntfy": {"url_env": "NTFY_URL"}},
-            "lint": {"forbidden_argv": ["--danger"]},
-        },
-        FAKE,
+def test_notify_transports_reject_incompatible_fields(
+    tmp_path: Path, transport: str, message: str
+) -> None:
+    path = tmp_path / "task.toml"
+    path.write_text(
+        'schema_version = 2\nname = "x"\ndescription = "x"\ncommand = ["true"]\n'
+        + transport
+        + "\n",
+        encoding="utf-8",
     )
-    assert manifest.defaults.timeout_seconds == 1800
-    assert manifest.hosts["a"].tasks == ("x",)
-    assert manifest.notify["ntfy"].kind == "ntfy"
-    assert manifest.lint.forbidden_argv == ("--danger",)
+    with pytest.raises(ConfigError, match=message):
+        parse_task(load_toml(path), path)
 
 
-def test_catchup_sweep_accepts_a_duration() -> None:
-    manifest = parse_manifest({"schema_version": 1, "defaults": {"catchup_sweep": "6h"}}, FAKE)
-    assert manifest.defaults.catchup_sweep_seconds == 21600
-
-
-def test_catchup_sweep_defaults_to_off() -> None:
-    assert parse_manifest({"schema_version": 1}, FAKE).defaults.catchup_sweep_seconds is None
-
-
-@pytest.mark.parametrize("value", ["soon", "6", 6, "-1h"])
-def test_catchup_sweep_rejects_garbage(value: object) -> None:
-    with pytest.raises(ConfigError):
-        parse_manifest({"schema_version": 1, "defaults": {"catchup_sweep": value}}, FAKE)
-
-
-def test_catchup_sweep_rejects_a_zero_length_period() -> None:
-    """launchd rejects a non-positive StartInterval; "off" is spelled by omission."""
-    with pytest.raises(ConfigError, match="must be a positive duration"):
-        parse_manifest({"schema_version": 1, "defaults": {"catchup_sweep": "0s"}}, FAKE)
-
-
-def test_manifest_requires_schema_version() -> None:
-    with pytest.raises(ConfigError, match="schema_version"):
-        parse_manifest({}, FAKE)
-
-
-def test_manifest_refuses_newer_schema_version() -> None:
-    with pytest.raises(ConfigError, match="newer than this tool"):
-        parse_manifest({"schema_version": 99}, FAKE)
-
-
-def test_manifest_rejects_unknown_field() -> None:
-    with pytest.raises(ConfigError, match="unknown field"):
-        parse_manifest({"schema_version": 1, "hostz": {}}, FAKE)
-
-
-def test_manifest_rejects_unknown_host_field() -> None:
-    with pytest.raises(ConfigError, match="unknown field"):
-        parse_manifest({"schema_version": 1, "hosts": {"a": {"task": []}}}, FAKE)
-
-
-def test_ntfy_transport_requires_url_env() -> None:
-    with pytest.raises(ConfigError, match="requires url_env"):
-        parse_manifest({"schema_version": 1, "notify": {"n": {"title": "x"}}}, FAKE)
-
-
-def test_command_transport_is_inferred_from_command() -> None:
-    manifest = parse_manifest(
-        {"schema_version": 1, "notify": {"desktop": {"command": ["true"]}}}, FAKE
+def test_summary_cmd_must_be_nonempty_when_supplied(tmp_path: Path) -> None:
+    path = tmp_path / "task.toml"
+    path.write_text(
+        'schema_version = 2\nname = "x"\ndescription = "x"\ncommand = ["true"]\nsummary_cmd = []\n',
+        encoding="utf-8",
     )
-    assert manifest.notify["desktop"].kind == "command"
-
-
-def test_runners_require_argv() -> None:
-    with pytest.raises(ConfigError, match="argv is required"):
-        parse_runners({"schema_version": 1, "runners": {"r": {"stdin": "prompt"}}}, FAKE)
-
-
-def test_runner_stdin_must_be_prompt() -> None:
-    with pytest.raises(ConfigError, match="stdin"):
-        parse_runners(
-            {"schema_version": 1, "runners": {"r": {"argv": ["x"], "stdin": "file"}}}, FAKE
-        )
-
-
-def test_task_requires_description() -> None:
-    with pytest.raises(ConfigError, match="description"):
-        parse_task_text('command = ["true"]')
-
-
-def test_task_rejects_unknown_field() -> None:
-    with pytest.raises(ConfigError, match="unknown field"):
-        parse_task_text('description = "d"\nhosts = ["a"]')
-
-
-def test_task_rejects_wrong_type() -> None:
-    with pytest.raises(ConfigError, match="command must be a list"):
-        parse_task_text('description = "d"\ncommand = "true"')
-
-
-def test_task_parses_schedule_and_durations() -> None:
-    task = parse_task_text(
-        'description = "d"\ncommand = ["true"]\nschedule = "daily 03:00"\ntimeout = "45m"'
-    )
-    assert task.timeout_seconds == 2700
-    assert task.schedule is not None
-    assert task.schedule.text == "daily 03:00"
-
-
-def test_task_reports_invalid_schedule_with_path() -> None:
-    with pytest.raises(ConfigError, match="unknown schedule form"):
-        parse_task_text('description = "d"\ncommand = ["true"]\nschedule = "hourly"')
-
-
-def test_effective_values_fall_back_to_defaults(tree: Tree) -> None:
-    tree.write_manifest(
-        "schema_version = 1\n\n"
-        '[defaults]\ntimeout = "30m"\nrandomized_delay = "5m"\n\n'
-        '[hosts.testhost]\ntasks = ["hello"]\n'
-    )
-    tree.write_task("hello", 'description = "d"\ncommand = ["true"]\nschedule = "daily 03:00"\n')
-    tree.write_task(
-        "override", 'description = "d"\ncommand = ["true"]\ntimeout = "1m"\npersistent = false\n'
-    )
-    automations = tree.load()
-    hello = automations.tasks["hello"]
-    override = automations.tasks["override"]
-    assert effective_timeout(automations.manifest, hello) == 1800
-    assert effective_timeout(automations.manifest, override) == 60
-    assert effective_randomized_delay(automations.manifest, hello) == 300
-    assert effective_persistent(automations.manifest, hello) is True
-    assert effective_persistent(automations.manifest, override) is False
-
-
-def test_load_collects_task_errors_without_raising(tree: Tree) -> None:
-    tree.write_task("good", 'description = "d"\ncommand = ["true"]\n')
-    tree.write_task("bad", "description = 3\n")
-    automations = tree.load()
-    assert "good" in automations.tasks
-    assert [error.path.stem for error in automations.errors] == ["bad"]
+    with pytest.raises(ConfigError, match="summary_cmd must be non-empty"):
+        parse_task(load_toml(path), path)

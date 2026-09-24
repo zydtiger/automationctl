@@ -5,4 +5,6 @@ Description=automationctl: catch up missed occurrences
 
 [Service]
 Type=oneshot
-ExecStart=/opt/bin/automationctl catch-up --manifest /home/example/automations/manifest.toml --host testhost
+Environment="XDG_CONFIG_HOME=/var/tmp/automationctl-fixture/config home%%"
+Environment="XDG_STATE_HOME=/var/tmp/automationctl-fixture/state home"
+ExecStart=/opt/bin/automationctl catch-up
