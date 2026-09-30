@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -56,7 +57,7 @@ def backend(tmp_path: Path) -> SystemdBackend:
 def test_absent_creatable_state_and_home_cwd_are_healthy(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
-    task = TaskSpec("check", tmp_path / "check.toml", "check", ("/bin/true",))
+    task = TaskSpec("check", tmp_path / "check.toml", "check", (sys.executable,))
     report = run(
         [task],
         [],
@@ -108,7 +109,7 @@ def test_binary_check_uses_wrapper_placeholder_and_tilde_invocation(
     home = tmp_path / "home"
     home.mkdir()
     task = TaskSpec("check", tmp_path / "check.toml", "check", ("~/{task}",))
-    monkeypatch.setattr("automationctl.template.os.path.expanduser", lambda value: "/bin/true")
+    monkeypatch.setattr("automationctl.template.os.path.expanduser", lambda value: sys.executable)
     report = run(
         [task],
         [],
@@ -118,6 +119,6 @@ def test_binary_check_uses_wrapper_placeholder_and_tilde_invocation(
         env={"HOME": str(home)},
     )
     assert any(
-        check.name == "binary" and "/bin/true -> /bin/true" in check.detail
+        check.name == "binary" and f"{sys.executable} -> {sys.executable}" in check.detail
         for check in report.checks
     )

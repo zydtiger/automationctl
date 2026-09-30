@@ -1,6 +1,6 @@
 [project]
 name = "automationctl"
-version = "0.2.0"
+version = "0.2.1"
 description = "Agent-neutral automation runner compiling declarative task specs to systemd and launchd"
 readme = "README.md"
 license = "MIT"
@@ -17,7 +17,7 @@ automationctl = "automationctl.cli:entrypoint"
 actl = "automationctl.cli:entrypoint"
 
 [build-system]
-requires = ["uv_build>=0.12.1,<0.13"]
+requires = ["uv_build>=0.11.28,<0.13"]
 build-backend = "uv_build"
 
 [dependency-groups]
