@@ -106,6 +106,8 @@ class ExecOptions:
     hostname: str
     env: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
     jitter: bool = False
+    lock_dir: Path | None = None
+    cancel_event: threading.Event | None = None
     kill_grace: float = KILL_GRACE_SECONDS
     capture_versions: bool = True
     sleeper: Callable[[float], None] = time.sleep
@@ -159,27 +161,32 @@ def _pump(source: IO[bytes], sink: Path, passthrough: TextIO) -> None:
 
 
 @contextmanager
-def _run_locks(state_dir: Path, task: TaskSpec) -> Iterator[None]:
+def _run_locks(state_dir: Path, task: TaskSpec, options: ExecOptions) -> Iterator[None]:
+    lock_dir = options.lock_dir or state_dir / "locks"
     with run_lock(state_dir / "locks", task.name):
         if task.lock is None:
             yield
         else:
-            with named_lock(state_dir / "locks", task.lock):
+            with named_lock(lock_dir, task.lock):
                 yield
 
 
 def _terminate(process: subprocess.Popen[bytes], grace: float) -> None:
-    for signal_number in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            os.killpg(process.pid, signal_number)
-        except (ProcessLookupError, PermissionError):
-            with suppress(ProcessLookupError):
-                process.send_signal(signal_number)
-        try:
-            process.wait(timeout=grace if signal_number == signal.SIGTERM else 5)
-            return
-        except subprocess.TimeoutExpired:
-            pass
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        process.terminate()
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=grace)
+    # The leader may have exited while a child ignored SIGTERM. Always finish
+    # the workload group before returning, including that successful wait path.
+    with suppress(ProcessLookupError, PermissionError):
+        os.killpg(process.pid, signal.SIGKILL)
+    if process.poll() is None:
+        process.kill()
+    process.wait(timeout=5)
 
 
 def _probe_version(program: str, env: Mapping[str, str]) -> str | None:
@@ -393,7 +400,7 @@ def exec_task(task: TaskSpec, options: ExecOptions) -> ExecResult:
         meta["jitter_seconds"] = round(delay, 3)
         options.sleeper(delay)
     try:
-        with _run_locks(options.state_dir, task):
+        with _run_locks(options.state_dir, task, options):
             return _execute(task, options, meta, run_dir, run_id, started)
     except LockBusy as exc:
         return _finalize(
@@ -430,6 +437,18 @@ def _execute(
         raise ConfigError(f"command not found on PATH: {program}", task.path)
     meta["program"] = resolved
     meta["timeout_seconds"] = task.timeout_seconds
+    if options.cancel_event is not None and options.cancel_event.is_set():
+        return _finalize(
+            task,
+            options,
+            meta,
+            run_dir,
+            run_id,
+            started,
+            "cancelled",
+            -signal.SIGTERM,
+            "execution cancelled before start",
+        )
     try:
         process = subprocess.Popen(
             [resolved, *invocation.argv[1:]],
@@ -466,16 +485,36 @@ def _execute(
     status = records.STATUS_OK
     reason = ""
     try:
-        exit_code = process.wait(timeout=task.timeout_seconds)
+        if options.cancel_event is None:
+            exit_code = process.wait(timeout=task.timeout_seconds)
+        else:
+            deadline = time.monotonic() + task.timeout_seconds if task.timeout_seconds else None
+            while True:
+                if options.cancel_event.is_set():
+                    _terminate(process, options.kill_grace)
+                    exit_code = process.returncode or -signal.SIGTERM
+                    status, reason = "cancelled", "execution cancelled"
+                    break
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    raise subprocess.TimeoutExpired(invocation.argv, task.timeout_seconds or 0)
+                try:
+                    exit_code = process.wait(timeout=min(0.2, remaining) if remaining else 0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
     except subprocess.TimeoutExpired:
         _terminate(process, options.kill_grace)
         exit_code = process.returncode if process.returncode is not None else -signal.SIGKILL
         status, reason = records.STATUS_TIMEOUT, f"timed out after {task.timeout_seconds}s"
+    if options.cancel_event is not None:
+        # A transient job cannot leave background children holding its logs open.
+        _terminate(process, options.kill_grace)
     for pump in pumps:
         pump.join(timeout=10)
     if writer is not None:
         writer.join(timeout=10)
-    if status != records.STATUS_TIMEOUT and exit_code != 0:
+    if status == records.STATUS_OK and exit_code != 0:
         status, reason = records.STATUS_FAILED, f"exited {exit_code}"
     _summary(task, run_dir, env, meta)
     if options.capture_versions and (version_text := _probe_version(resolved, env)):

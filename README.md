@@ -47,6 +47,56 @@ Generated scheduler artifacts receive the resolved `XDG_CONFIG_HOME` and
 installed task set. Run records remain under `$XDG_STATE_HOME/automationctl`
 or `~/.local/state/automationctl`.
 
+## Transient execution
+
+Submit a one-time command without installing a reusable task:
+
+```bash
+actl submit --transient demo -- /usr/bin/printf 'hello\n'
+actl submit --transient demo --after 10m -- /usr/bin/true
+actl submit --transient demo --at '2030-01-02T09:00:00-05:00' -- /usr/bin/true
+actl submit --transient demo --dry-run --timeout 2m -- /usr/bin/true
+```
+
+`--at` requires a future timestamp with a timezone offset; it and `--after`
+are mutually exclusive. Submission returns an execution ID such as
+`tx:0123456789abcdef0123456789abcdef` after scheduler acceptance and displays
+the intended trigger time. Reusing `demo`, including an installed task's name,
+creates independent executions. `submit demo` still starts the installed task.
+
+Use `--cwd`, `--timeout`, `--stdin` or `--stdin-file`, repeated `--env KEY=VALUE`,
+`--env-file`, `--path-prepend`, and `--lock` to configure the existing wrapper.
+The current directory becomes cwd; stdin files are copied into the execution
+snapshot. Arguments following `--` are direct argv. Dry-run neither writes
+files nor contacts a scheduler.
+
+```bash
+actl list
+actl status tx:0123456789abcdef0123456789abcdef
+actl logs tx:0123456789abcdef0123456789abcdef --both
+actl cancel tx:0123456789abcdef0123456789abcdef
+actl reconcile tx:0123456789abcdef0123456789abcdef
+```
+
+`cancel` stops one transient execution and retains its history. `remove NAME`
+continues to remove installed tasks. `reconcile ID` retries cleanup or marks
+an execution abandoned when its scheduler registration disappeared; it never
+restarts work. Acceptance errors include the ID for inspection and cancellation;
+do not automatically resubmit an ambiguously accepted command.
+
+Snapshots, outcome and logs stay under the private XDG state directory, separate
+from installed definitions. Workload result and cleanup result are independent;
+`cleanup=delegated` means final collection belongs to the scheduler, and
+reconciliation confirms `collected`. `prune --keep-runs N` retains the newest N
+collected terminal executions per display name as well as installed-run history.
+
+Linux uses collected systemd user services and one-time timers. macOS uses
+private launchd jobs; delayed executions each hold one sleeping wrapper until
+the wall-clock deadline. Deadlines catch up after sleep without waking the host.
+Registrations do not survive reboot or user-manager/GUI-domain teardown; Linux
+logout survival follows the user manager's existing linger configuration.
+macOS native validation is pending; see [the native test procedure](docs/TRANSIENT_TESTING.md).
+
 ## Development
 
 ```bash

@@ -1,6 +1,6 @@
 ---
 name: automationctl-skill
-description: Install, inspect, run, and remove standalone automationctl tasks managed through XDG configuration.
+description: Install standalone tasks and submit, inspect, cancel, and reconcile transient automationctl executions.
 ---
 
 # Use automationctl
@@ -41,3 +41,27 @@ fallback and has no effect on systemd artifacts. The scheduler units propagate
 the resolved standard XDG config/state homes. There is no manifest, runner,
 host alias, current-directory configuration discovery, `--manifest`, `--host`,
 or `uninstall` compatibility command.
+
+## Transient commands
+
+Use `actl submit --transient NAME [--after DURATION | --at OFFSET_TIMESTAMP] --
+COMMAND...` for one-time execution without installing a reusable task. `--at`
+must be future and timezone-aware. Omit timing options to run immediately.
+Preview with `--dry-run`; no directories or scheduler jobs are created.
+`--cwd`, `--timeout`, `--stdin`/`--stdin-file`, repeated `--env KEY=VALUE`,
+`--env-file`, `--path-prepend`, and `--lock` configure the existing wrapper.
+
+Save the returned `tx:<32 hex digits>` ID. Repeated display names are independent,
+even when the name matches an installed task. Use `status ID`, `logs ID --both`,
+and `cancel ID`; `remove NAME` applies only to installed tasks. `reconcile ID`
+confirms collection, retries cleanup, or records a disappeared execution as
+abandoned. It never retries the workload. On uncertain scheduler acceptance,
+inspect the reported ID rather than submitting again. Workload result and
+cleanup state are separate. Logs remain after registration cleanup; `prune`
+retains terminal collected execution history per display name.
+
+Transient registrations are boot/session scoped. On macOS each delayed job
+has a sleeping launchd-owned wrapper until its absolute deadline, and GUI logout
+ends the job. On Linux logout behavior follows the existing user manager;
+reboot does not restore pending jobs. Native macOS validation is pending;
+consult the repository's transient testing procedure before relying on it.
