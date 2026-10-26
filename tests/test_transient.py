@@ -471,3 +471,67 @@ def test_simultaneous_submissions_and_duplicate_dispatch(tmp_path: Path) -> None
         _, err = process.communicate(timeout=10)
         assert process.returncode == 0, err
     assert marker.read_text() == "once\n"
+
+
+@pytest.mark.parametrize("during_stop", [False, True])
+def test_supervised_workload_dies_with_wrapper(tmp_path: Path, during_stop: bool) -> None:
+    import os
+    import subprocess
+    import sys
+    import time
+
+    marker = tmp_path / "pids"
+    # Both workload generations ignore TERM; only group cleanup can stop them.
+    child = (
+        "import os,signal,time,pathlib; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"pathlib.Path({str(marker)!r}).write_text(str(os.getppid())+' '+str(os.getpid())); "
+        "time.sleep(60)"
+    )
+    parent = (
+        "import subprocess,sys,signal,time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"subprocess.Popen([sys.executable,'-c',{child!r}]); time.sleep(60)"
+    )
+    source = (
+        "from pathlib import Path; from automationctl.spec import TaskSpec; "
+        "from automationctl.wrapper import ExecOptions,exec_task; "
+        f"task=TaskSpec('demo',Path({str(tmp_path / 'demo.toml')!r}),'demo',"
+        f"({sys.executable!r},'-c',{parent!r})); "
+        f"exec_task(task,ExecOptions(Path({str(tmp_path / 'state')!r}),'host',"
+        "supervise_workload=True,capture_versions=False))"
+    )
+    wrapper = subprocess.Popen([sys.executable, "-c", source])
+    pids: list[int] = []
+    try:
+        until = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < until:
+            time.sleep(0.05)
+        pids = [int(value) for value in marker.read_text().split()]
+        if during_stop:
+            os.killpg(os.getpgid(pids[0]), signal.SIGTERM)
+        wrapper.kill()
+        wrapper.wait(timeout=5)
+        until = time.monotonic() + 5
+        while time.monotonic() < until:
+            states = [
+                subprocess.run(
+                    ["ps", "-o", "stat=", "-p", str(pid)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                ).stdout.strip()
+                for pid in pids
+            ]
+            if all(not state or state.startswith("Z") for state in states):
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail(f"workload survived wrapper SIGKILL: {states}")
+    finally:
+        if wrapper.poll() is None:
+            wrapper.kill()
+        wrapper.wait(timeout=5)
+        for pid in pids:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)

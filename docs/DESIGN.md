@@ -135,15 +135,19 @@ atomically persisting its terminal outcome, the wrapper unlinks only its own
 private plist and durably records cleanup delegation. Its final operation is
 `launchctl bootout` of its own unique target. This may terminate the wrapper;
 no result writing or notification is required after that call, and its scheduler
-exit status is not the workload result. There is no independent background
-helper or daemon. A failed bootout retains cleanup failure separately from the
+exit status is not the workload result. There is no resident daemon. While a workload runs, a per-execution supervisor
+owns its process group and watches a pipe held only by the wrapper. Wrapper
+death closes the pipe and the supervisor kills its group, including descendants.
+It remains alive after command exit until group cleanup, preserving this guarantee
+during result delivery. The workload exit code is returned separately to the wrapper. A failed bootout retains cleanup failure separately from the
 workload result. Abrupt death can leave a temporary plist or registration;
 `reconcile ID` inspects and removes that execution's stale artifacts.
 
-Native macOS verification is pending. `scripts/smoke_transient.py --run` checks
+`scripts/smoke_transient.py --run` checks
 immediate success/failure, timeout, pending/running cancellation, absolute and
 relative deadlines, retained logs, and automatic scheduler collection before
-reconciliation. Run it on the target macOS version and inspect its installed
+reconciliation, plus workload and descendant cleanup after wrapper SIGKILL.
+Run it on the target macOS version and inspect its installed
 `launchd.plist(5)` and `launchctl(1)` manual pages before accepting this backend.
 Sleep/wake and logout require separate interactive tests. Linux mocks validate
 argv and state ordering only, not launchd's native unload or process behavior.

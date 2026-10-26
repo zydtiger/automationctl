@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import select
 import shutil
 import signal
 import subprocess
@@ -108,6 +109,7 @@ class ExecOptions:
     jitter: bool = False
     lock_dir: Path | None = None
     cancel_event: threading.Event | None = None
+    supervise_workload: bool = False
     kill_grace: float = KILL_GRACE_SECONDS
     capture_versions: bool = True
     sleeper: Callable[[float], None] = time.sleep
@@ -171,15 +173,25 @@ def _run_locks(state_dir: Path, task: TaskSpec, options: ExecOptions) -> Iterato
                 yield
 
 
-def _terminate(process: subprocess.Popen[bytes], grace: float) -> None:
+def _terminate(
+    process: subprocess.Popen[bytes],
+    grace: float,
+    result_fd: int | None = None,
+    *,
+    completed: bool = False,
+) -> int | None:
+    workload_code = None
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        return process.poll()
     except PermissionError:
         process.terminate()
     with suppress(subprocess.TimeoutExpired):
-        process.wait(timeout=grace)
+        if result_fd is None:
+            process.wait(timeout=grace)
+        elif not completed:
+            workload_code = _wait_workload(process, grace, result_fd)
     # The leader may have exited while a child ignored SIGTERM. Always finish
     # the workload group before returning, including that successful wait path.
     with suppress(ProcessLookupError, PermissionError):
@@ -187,6 +199,8 @@ def _terminate(process: subprocess.Popen[bytes], grace: float) -> None:
     if process.poll() is None:
         process.kill()
     process.wait(timeout=5)
+
+    return workload_code if workload_code is not None else process.returncode
 
 
 def _probe_version(program: str, env: Mapping[str, str]) -> str | None:
@@ -421,6 +435,51 @@ def _execute(
     run_id: str,
     started: datetime,
 ) -> ExecResult:
+    if not options.supervise_workload:
+        return _execute_workload(task, options, meta, run_dir, run_id, started)
+    watch_read, watch_write = os.pipe()
+    result_read, result_write = os.pipe()
+    try:
+        return _execute_workload(
+            task,
+            options,
+            meta,
+            run_dir,
+            run_id,
+            started,
+            (watch_read, result_write, result_read),
+        )
+    finally:
+        for fd in (watch_read, watch_write, result_read, result_write):
+            os.close(fd)
+
+
+def _wait_workload(
+    process: subprocess.Popen[bytes],
+    timeout: float | None,
+    result_fd: int | None,
+) -> int:
+    if result_fd is None:
+        return process.wait(timeout=timeout)
+    ready, _, _ = select.select([result_fd], [], [], timeout)
+    if not ready:
+        # A supervisor failure must not leave an unlimited workload wait.
+        if process.poll() is not None:
+            return process.returncode or 1
+        raise subprocess.TimeoutExpired(process.args, timeout or 0)
+    payload = os.read(result_fd, 32)
+    return int(payload) if payload else 1
+
+
+def _execute_workload(
+    task: TaskSpec,
+    options: ExecOptions,
+    meta: dict[str, Any],
+    run_dir: Path,
+    run_id: str,
+    started: datetime,
+    supervision: tuple[int, int, int] | None = None,
+) -> ExecResult:
     env = build_env(task, options.env, run_dir)
     invocation = build_invocation(
         task, builtin_values(task.name, options.hostname, str(run_dir), started)
@@ -449,15 +508,27 @@ def _execute(
             -signal.SIGTERM,
             "execution cancelled before start",
         )
+    argv = [resolved, *invocation.argv[1:]]
+    if supervision is not None:
+        argv = [
+            sys.executable,
+            "-I",
+            "-m",
+            "automationctl.supervisor",
+            str(supervision[0]),
+            str(supervision[1]),
+            *argv,
+        ]
     try:
         process = subprocess.Popen(
-            [resolved, *invocation.argv[1:]],
+            argv,
             cwd=cwd,
             env=env,
             stdin=subprocess.PIPE if invocation.stdin_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
+            pass_fds=supervision[:2] if supervision is not None else (),
         )
     except OSError as exc:
         raise ConfigError(f"cannot start {resolved}: {exc}", task.path) from exc
@@ -484,32 +555,38 @@ def _execute(
         writer.start()
     status = records.STATUS_OK
     reason = ""
+    result_fd = supervision[2] if supervision is not None else None
     try:
-        if options.cancel_event is None:
+        if options.cancel_event is None and supervision is None:
             exit_code = process.wait(timeout=task.timeout_seconds)
         else:
             deadline = time.monotonic() + task.timeout_seconds if task.timeout_seconds else None
             while True:
-                if options.cancel_event.is_set():
-                    _terminate(process, options.kill_grace)
-                    exit_code = process.returncode or -signal.SIGTERM
+                if options.cancel_event is not None and options.cancel_event.is_set():
+                    exit_code = (
+                        _terminate(process, options.kill_grace, result_fd) or -signal.SIGTERM
+                    )
                     status, reason = "cancelled", "execution cancelled"
                     break
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     raise subprocess.TimeoutExpired(invocation.argv, task.timeout_seconds or 0)
                 try:
-                    exit_code = process.wait(timeout=min(0.2, remaining) if remaining else 0.2)
+                    exit_code = _wait_workload(
+                        process,
+                        min(0.2, remaining) if remaining else 0.2,
+                        supervision[2] if supervision is not None else None,
+                    )
                     break
                 except subprocess.TimeoutExpired:
                     continue
     except subprocess.TimeoutExpired:
-        _terminate(process, options.kill_grace)
-        exit_code = process.returncode if process.returncode is not None else -signal.SIGKILL
+        stopped_code = _terminate(process, options.kill_grace, result_fd)
+        exit_code = stopped_code if stopped_code is not None else -signal.SIGKILL
         status, reason = records.STATUS_TIMEOUT, f"timed out after {task.timeout_seconds}s"
-    if options.cancel_event is not None:
+    if options.cancel_event is not None or supervision is not None:
         # A transient job cannot leave background children holding its logs open.
-        _terminate(process, options.kill_grace)
+        _terminate(process, options.kill_grace, result_fd, completed=True)
     for pump in pumps:
         pump.join(timeout=10)
     if writer is not None:

@@ -234,6 +234,7 @@ def execute(state: Path, execution_id: str, options: ExecOptions, backend: Backe
             options.cancel_event = cancelled
             # A --version probe is another execution of the user command.
             options.capture_versions = False
+            options.supervise_workload = isinstance(backend, LaunchdBackend)
             result = exec_task(task, options)
             with locked(state, execution_id) as data:
                 data.update(

@@ -11,10 +11,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -36,6 +38,7 @@ def main() -> None:
     env.pop("AUTOMATIONCTL_BACKEND", None)
     env.pop("AUTOMATIONCTL_UNIT_DIR", None)
     ids: list[str] = []
+    workload_pids: list[int] = []
 
     def cli(*argv: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -129,6 +132,55 @@ def main() -> None:
             (running, "cancelled"),
         ]:
             wait(execution_id, expected)
+        if sys.platform == "darwin":
+            marker = root / "workload-pids.json"
+            child = (
+                "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)"
+            )
+            parent = (
+                "import os,subprocess,sys,time,json,pathlib; "
+                f"p=subprocess.Popen([sys.executable,'-c',{child!r}]); "
+                f"pathlib.Path({str(marker)!r}).write_text(json.dumps([os.getpid(),p.pid])); "
+                "time.sleep(120)"
+            )
+            killed = submit(command=(sys.executable, "-c", parent))
+            until = time.monotonic() + 10
+            while not marker.exists() and time.monotonic() < until:
+                time.sleep(0.1)
+            workload_pids = json.loads(marker.read_text())
+            subprocess.run(
+                [
+                    "launchctl",
+                    "kill",
+                    "SIGKILL",
+                    f"gui/{os.getuid()}/automationctl.transient.{killed[3:]}",
+                ],
+                check=True,
+                timeout=5,
+            )
+            until = time.monotonic() + 5
+            while time.monotonic() < until:
+                states = [
+                    subprocess.run(
+                        ["ps", "-o", "stat=", "-p", str(pid)],
+                        text=True,
+                        capture_output=True,
+                        timeout=5,
+                    ).stdout.strip()
+                    for pid in workload_pids
+                ]
+                if all(not value or value.startswith("Z") for value in states):
+                    break
+                time.sleep(0.1)
+            else:
+                raise AssertionError(f"workload survived wrapper SIGKILL: {states}")
+            cli("reconcile", killed)
+            assert state(killed)["status"] == "abandoned"
+            assert state(killed)["cleanup"] == "collected"
+            assert not (
+                root / "state" / "automationctl" / "transient" / killed[3:] / "job.plist"
+            ).exists()
+            print(f"PASS {killed} wrapper SIGKILL cleaned workload and descendant", flush=True)
         assert "smoke" in cli("logs", successful).stdout
         assert "failure" in cli("logs", failed).stdout
         assert state(failed)["exit_code"] == 7
@@ -136,6 +188,9 @@ def main() -> None:
     except BaseException:
         for execution_id in ids:
             cli("cancel", execution_id, check=False)
+        for pid in workload_pids:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
         print(f"Evidence retained at {root}", file=sys.stderr)
         raise
     else:

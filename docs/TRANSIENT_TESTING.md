@@ -21,8 +21,9 @@ and run from a logged-in GUI session with the `gui/<uid>` domain available.
 Verify that final bootout terminates the wrapper only after the retained workload
 result and logs are complete. Also check that no `job.plist` remains under the
 printed execution directory and no transient plist appears in LaunchAgents.
-Native macOS testing remains pending; the Linux suite cannot certify these
-semantics.
+The macOS runner also kills a running wrapper with SIGKILL, verifies that its
+workload and descendant exit before reconciliation, then checks abandoned status
+and removal of the private plist. Linux tests cannot certify launchd semantics.
 
 For interactive sleep/wake validation, use a disposable XDG root and schedule a
 job a few minutes ahead, sleep past the deadline, then wake. Confirm one run and
