@@ -88,7 +88,7 @@ def temp_name(path: Path) -> Path:
     return path.with_name(f"{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
 
 
-def write_json(path: Path, data: Mapping[str, Any]) -> Path:
+def write_json(path: Path, data: Mapping[str, Any], *, durable: bool = False) -> Path:
     """Write JSON atomically.
 
     The temporary name carries a pid and a random suffix. Two runs of the same
@@ -106,7 +106,16 @@ def write_json(path: Path, data: Mapping[str, Any]) -> Path:
         )
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+            if durable:
+                handle.flush()
+                os.fsync(handle.fileno())
         tmp.replace(path)
+        if durable:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     except OSError:
         tmp.unlink(missing_ok=True)
         raise

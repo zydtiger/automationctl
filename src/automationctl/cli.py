@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import json
 import os
 import socket
 import subprocess
@@ -13,7 +14,7 @@ from typing import Annotated
 
 import typer
 
-from . import backends, catchup, paths, records
+from . import backends, catchup, paths, records, transient
 from . import doctor as doctor_module
 from . import lint as lint_module
 from .backends import Backend, ReconcilePlan
@@ -29,7 +30,7 @@ from .config import (
     write_installed,
 )
 from .errors import AutomationctlError, ConfigError
-from .schedule import format_duration
+from .schedule import format_duration, parse_duration
 from .schedule import parse as parse_schedule
 from .spec import MachinePolicy, TaskSpec, validate_task_name
 from .wrapper import ExecOptions, exec_task
@@ -370,14 +371,137 @@ def exec_command(
 @app.command()
 def submit(
     name: Annotated[str, typer.Argument()],
+    command: Annotated[list[str] | None, typer.Argument(help="Transient argv after --.")] = None,
+    transient_run: Annotated[bool, typer.Option("--transient")] = False,
+    after: Annotated[str | None, typer.Option("--after")] = None,
+    at: Annotated[str | None, typer.Option("--at")] = None,
+    cwd: Annotated[Path | None, typer.Option("--cwd")] = None,
+    timeout: Annotated[str | None, typer.Option("--timeout")] = None,
+    stdin: Annotated[str | None, typer.Option("--stdin")] = None,
+    stdin_file: Annotated[Path | None, typer.Option("--stdin-file")] = None,
+    environment: Annotated[
+        list[str] | None, typer.Option("--env", help="KEY=VALUE; repeatable.")
+    ] = None,
+    env_file: Annotated[list[str] | None, typer.Option("--env-file")] = None,
+    path_prepend: Annotated[list[str] | None, typer.Option("--path-prepend")] = None,
+    lock: Annotated[str | None, typer.Option("--lock")] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
     backend: BackendOption = None,
     unit_dir: UnitDirOption = None,
 ) -> None:
     env = _env()
-    _, scheduler = _backend(backend, unit_dir, env)
-    task = _installed_or_fail(name, env)
-    _report(scheduler.submit(task))
-    typer.echo(f"submitted {name}")
+    label, scheduler = _backend(backend, unit_dir, env)
+    if not transient_run:
+        if (
+            any(
+                value is not None
+                for value in (
+                    command,
+                    after,
+                    at,
+                    cwd,
+                    timeout,
+                    stdin,
+                    stdin_file,
+                    environment,
+                    env_file,
+                    path_prepend,
+                    lock,
+                )
+            )
+            or dry_run
+        ):
+            raise _fail("command and execution options require --transient")
+        _report(scheduler.submit(_installed_or_fail(name, env)))
+        typer.echo(f"submitted {name}")
+        return
+    try:
+        source = Path.cwd() / f"{name}.toml"
+        validate_task_name(name, source)
+        if not command:
+            raise AutomationctlError("--transient requires COMMAND after --")
+        if stdin is not None and stdin_file is not None:
+            raise AutomationctlError("--stdin and --stdin-file are mutually exclusive")
+        values = {}
+        for item in environment or []:
+            key, separator, value = item.partition("=")
+            if not separator or not key or "=" in key or "\x00" in item:
+                raise AutomationctlError("--env requires KEY=VALUE")
+            values[key] = value
+        due = transient.deadline(after, at)
+        task = materialize(
+            TaskSpec(
+                name=name,
+                path=source,
+                description=name,
+                command=tuple(command),
+                cwd=str(paths.expand(cwd or Path.cwd()).resolve()),
+                timeout_seconds=parse_duration(timeout) if timeout is not None else None,
+                stdin=stdin,
+                stdin_file=str(stdin_file) if stdin_file is not None else None,
+                env=values,
+                env_files=tuple(env_file or ()),
+                path_prepend=tuple(path_prepend or ()),
+                lock=lock,
+            )
+        )
+        _lint(task, load_policy(env), label)
+        execution_id = transient.submit(task, scheduler, due, dry_run=dry_run)
+    except (AutomationctlError, OSError, ValueError) as exc:
+        raise _fail(str(exc)) from exc
+    typer.echo(f"{'dry-run' if dry_run else 'submitted'} {execution_id}: {name}")
+    typer.echo(f"trigger: {due.isoformat() if due else 'immediate'}")
+
+
+@app.command("_transient-exec", hidden=True)
+def transient_exec(execution_id: str) -> None:
+    env = _env()
+    data = transient.read(paths.state_dir(env), execution_id)
+    _, scheduler = _backend(data["backend"], None, env)
+    try:
+        code = transient.execute(
+            paths.state_dir(env),
+            execution_id,
+            ExecOptions(
+                state_dir=paths.state_dir(env),
+                hostname=_hostname(),
+                env=env,
+            ),
+            scheduler,
+        )
+    except (AutomationctlError, OSError) as exc:
+        raise _fail(str(exc), EXIT_FAILURE) from exc
+    raise typer.Exit(code)
+
+
+@app.command("_transient-finish", hidden=True)
+def transient_finish(execution_id: str) -> None:
+    env = _env()
+    _, scheduler = _backend("systemd", None, env)
+    transient.finish(paths.state_dir(env), execution_id, scheduler, env)
+
+
+def _control_execution(execution_id: str, cancel: bool) -> None:
+    env = _env()
+    try:
+        data = transient.read(paths.state_dir(env), execution_id)
+        _, scheduler = _backend(data["backend"], None, env)
+        transient.reconcile(paths.state_dir(env), execution_id, scheduler, cancel=cancel)
+        typer.echo(json.dumps(transient.read(paths.state_dir(env), execution_id), indent=2))
+    except (AutomationctlError, OSError) as exc:
+        raise _fail(str(exc), EXIT_FAILURE) from exc
+
+
+@app.command()
+def cancel(execution_id: str) -> None:
+    """Stop one transient execution, retaining its result and logs."""
+    _control_execution(execution_id, True)
+
+
+@app.command()
+def reconcile(execution_id: str) -> None:
+    """Recover one abandoned execution or retry its scheduler cleanup."""
+    _control_execution(execution_id, False)
 
 
 @app.command("catch-up")
@@ -420,8 +544,15 @@ def list_tasks(backend: BackendOption = None, unit_dir: UnitDirOption = None) ->
     tasks, errors = discover_installed(env)
     for error in errors:
         typer.secho(f"warning: {error}", fg=typer.colors.YELLOW, err=True)
+    executions = transient.discover(paths.state_dir(env))
+    for execution in executions:
+        typer.echo(
+            f"{execution['id']}  {execution['name']}  "
+            f"{execution['status']}  cleanup={execution['cleanup']}"
+        )
     if not tasks:
-        typer.echo("no installed tasks")
+        if not executions:
+            typer.echo("no installed tasks")
         return
     typer.echo("TASK  SCHEDULE  DESIRED  SUBSTRATE  LAST")
     for task in tasks.values():
@@ -442,6 +573,15 @@ def status(
     unit_dir: UnitDirOption = None,
 ) -> None:
     env = _env()
+    if name is not None and transient.is_id(name):
+        try:
+            typer.echo(json.dumps(transient.read(paths.state_dir(env), name), indent=2))
+        except AutomationctlError as exc:
+            raise _fail(str(exc)) from exc
+        return
+    if name is None:
+        for execution in transient.discover(paths.state_dir(env)):
+            typer.echo(json.dumps(execution, indent=2))
     if name is not None:
         _validate_record_name(name, env)
     tasks, _ = discover_installed(env)
@@ -505,6 +645,16 @@ def logs(
     if sum((show_stdout, show_stderr, show_both)) > 1:
         raise _fail("choose at most one of --stdout, --stderr, and --both")
     env = _env()
+    record_state = paths.state_dir(env)
+    if transient.is_id(name):
+        try:
+            data = transient.read(record_state, name)
+        except AutomationctlError as exc:
+            raise _fail(str(exc)) from exc
+        record_state = transient.directory(record_state, name) / "history"
+        name = data["name"]
+        if follow:
+            raise _fail("transient logs are retained files; omit --follow")
     _validate_record_name(name, env)
     if follow:
         if show_stdout or show_stderr or show_both:
@@ -518,7 +668,7 @@ def logs(
             raise typer.Exit(subprocess.call(argv))
         except FileNotFoundError as exc:
             raise _fail(f"cannot follow logs: {exc}") from exc
-    latest = records.latest_run(paths.state_dir(env), name)
+    latest = records.latest_run(record_state, name)
     if latest is None:
         typer.echo(f"no recorded runs for {name}")
         return
@@ -613,7 +763,13 @@ def doctor(backend: BackendOption = None, unit_dir: UnitDirOption = None) -> Non
 @app.command()
 def prune(keep_runs: Annotated[int, typer.Option("--keep-runs", min=0)] = 50) -> None:
     removed = records.prune(paths.state_dir(_env()), keep_runs)
-    typer.echo(f"pruned {len(removed)} run(s)")
+    env = _env()
+    executions = transient.discover(paths.state_dir(env))
+    count = 0
+    for backend_name in sorted({data["backend"] for data in executions}):
+        _, scheduler = _backend(backend_name, None, env)
+        count += transient.prune(paths.state_dir(env), keep_runs, scheduler)
+    typer.echo(f"pruned {len(removed)} run(s), {count} transient execution(s)")
 
 
 def entrypoint() -> None:
