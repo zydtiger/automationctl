@@ -576,3 +576,42 @@ def test_cancellation_preserves_workload_exit_code(
     assert meta is not None and last is not None
     assert meta["status"] == last["status"] == "cancelled"
     assert meta["exit_code"] == last["exit_code"] == workload_exit_code
+
+
+def test_prune_uses_completion_age_across_names(tmp_path: Path) -> None:
+    from datetime import timedelta
+
+    from automationctl import records
+
+    backend, _ = scheduler(tmp_path)
+    ids = [transient.submit(task(tmp_path), backend, None) for _ in range(3)]
+    for execution_id in ids:
+        transient.execute(backend.state_dir, execution_id, options(backend.state_dir), backend)
+        transient.reconcile(backend.state_dir, execution_id, backend)
+    for index, execution_id in enumerate(ids):
+        with transient.locked(backend.state_dir, execution_id) as data:
+            data["name"] = f"unique-{index}"
+            data["created_at"] = (records.utcnow() - timedelta(days=30)).isoformat()
+            data["finished_at"] = (
+                records.utcnow() - timedelta(days=8 if index == 0 else 1)
+            ).isoformat()
+    before = {p: p.read_bytes() for p in backend.state_dir.rglob("*") if p.is_file()}
+    assert transient.prune_candidates(backend.state_dir, 7 * 86400) == [
+        transient.directory(backend.state_dir, ids[0])
+    ]
+    assert before == {p: p.read_bytes() for p in backend.state_dir.rglob("*") if p.is_file()}
+    assert transient.prune(backend.state_dir, 7 * 86400, backend) == 1
+    assert all(transient.read(backend.state_dir, i) for i in ids[1:])
+    assert transient.prune(backend.state_dir, 0, backend) == 2
+
+
+@pytest.mark.parametrize("finished", [None, "invalid", "2020-01-01T00:00:00"])
+def test_prune_retains_unusable_completion_time(tmp_path: Path, finished: str | None) -> None:
+    backend, _ = scheduler(tmp_path)
+    execution_id = transient.submit(task(tmp_path), backend, None)
+    transient.execute(backend.state_dir, execution_id, options(backend.state_dir), backend)
+    transient.reconcile(backend.state_dir, execution_id, backend)
+    with transient.locked(backend.state_dir, execution_id) as data:
+        data["finished_at"] = finished
+    assert transient.prune(backend.state_dir, 0, backend) == 0
+    assert transient.directory(backend.state_dir, execution_id).exists()

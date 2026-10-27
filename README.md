@@ -87,8 +87,26 @@ do not automatically resubmit an ambiguously accepted command.
 Snapshots, outcome and logs stay under the private XDG state directory, separate
 from installed definitions. Workload result and cleanup result are independent;
 `cleanup=delegated` means final collection belongs to the scheduler, and
-reconciliation confirms `collected`. `prune --keep-runs N` retains the newest N
-collected terminal executions per display name as well as installed-run history.
+reconciliation confirms `collected`. `prune` retains the newest 50 runs per installed task and seven days of
+collected terminal transient history, measured from completion rather than creation.
+Transient retention does not group by display name. Override these independently:
+
+```sh
+actl prune --keep-runs 20 --transient-older-than 3d
+actl prune --only transient --transient-older-than 7d
+actl prune --only transient --transient-older-than 0s
+actl prune --only scheduled --keep-runs 20
+actl prune --dry-run
+```
+
+`--only` accepts `all` (default), `scheduled` (installed-task history, including
+manual runs), or `transient`. Transient pruning removes the entire execution
+directory, including its snapshot and logs, only after terminal status and
+confirmed collection. Missing or invalid completion times are retained.
+`--dry-run` lists candidate paths and file sizes without writes or scheduler
+calls; it does not reconcile, so unresolved collection is excluded from preview.
+Actual pruning first retries terminal cleanup. Project workload outputs outside
+ACTL history are unaffected.
 
 Linux uses collected systemd user services and one-time timers. macOS uses
 private launchd jobs; delayed executions each hold one sleeping wrapper until

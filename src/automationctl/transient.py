@@ -419,24 +419,37 @@ def reconcile(state: Path, execution_id: str, backend: Backend, *, cancel: bool 
         raise
 
 
-def prune(state: Path, keep: int, backend: Backend) -> int:
-    """Verify terminal registrations are gone before applying per-name retention."""
-    groups: dict[str, list[dict[str, Any]]] = {}
+def prune_candidates(state: Path, older_than: int) -> list[Path]:
+    """Read eligible history without scheduler calls or filesystem writes."""
+    if older_than < 0:
+        raise ValueError("older_than must not be negative")
+    cutoff = records.utcnow() - timedelta(seconds=older_than)
+    candidates = []
+    for data in discover(state):
+        if data["status"] not in TERMINAL or data.get("cleanup") != "collected":
+            continue
+        try:
+            finished = datetime.fromisoformat(data["finished_at"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if finished.tzinfo is not None and finished <= cutoff:
+            candidates.append(directory(state, data["id"]))
+    return candidates
+
+
+def prune(state: Path, older_than: int, backend: Backend) -> int:
+    """Reconcile terminal registrations, then apply completion-age retention."""
+    eligible = set()
     for data in discover(state):
         if data["status"] in TERMINAL and data["backend"] == backend.name:
             try:
                 reconcile(state, data["id"], backend)
             except AutomationctlError:
                 continue
-            data = read(state, data["id"])
-            if data["cleanup"] == "collected":
-                groups.setdefault(data["name"], []).append(data)
+            eligible.add(directory(state, data["id"]))
     removed = 0
-    for group in groups.values():
-        group.sort(key=lambda data: data["created_at"], reverse=True)
-        for data in group[keep:]:
-            root = directory(state, data["id"])
-            # A claimed/terminal execution can never launch again.
+    for root in prune_candidates(state, older_than):
+        if root in eligible:
             shutil.rmtree(root)
             removed += 1
     return removed

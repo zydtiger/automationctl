@@ -245,3 +245,22 @@ def test_legacy_interfaces_are_rejected_and_manifest_env_cwd_are_ignored(
         == 2
     )
     assert runner.invoke(app, ["uninstall", "task"], env=legacy_env).exit_code == 2
+
+
+def test_prune_scope_and_read_only_preview(
+    runner: CliRunner, isolated_env: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from automationctl import cli, transient
+
+    def unexpected(*args: object, **kwargs: object) -> None:
+        pytest.fail("scheduler or wrong scope accessed")
+
+    monkeypatch.setattr(cli, "_backend", unexpected)
+    monkeypatch.setattr(transient, "discover", unexpected)
+    result = runner.invoke(app, ["prune", "--only", "scheduled"], env=isolated_env)
+    assert result.exit_code == 0, result.output
+    monkeypatch.setattr(transient, "prune_candidates", lambda *args: [])
+    result = runner.invoke(app, ["prune", "--dry-run"], env=isolated_env)
+    assert result.exit_code == 0 and "no reconciliation" in result.output
+    for args in [["--only", "invalid"], ["--transient-older-than", "-1d"]]:
+        assert runner.invoke(app, ["prune", *args], env=isolated_env).exit_code == 2

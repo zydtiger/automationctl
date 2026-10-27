@@ -8,6 +8,7 @@ import os
 import socket
 import subprocess
 from collections.abc import Sequence
+from enum import StrEnum
 from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
@@ -760,15 +761,48 @@ def doctor(backend: BackendOption = None, unit_dir: UnitDirOption = None) -> Non
         raise typer.Exit(EXIT_FAILURE)
 
 
+class PruneScope(StrEnum):
+    all = "all"
+    scheduled = "scheduled"
+    transient = "transient"
+
+
 @app.command()
-def prune(keep_runs: Annotated[int, typer.Option("--keep-runs", min=0)] = 50) -> None:
-    removed = records.prune(paths.state_dir(_env()), keep_runs)
+def prune(
+    keep_runs: Annotated[int, typer.Option("--keep-runs", min=0)] = 50,
+    transient_older_than: Annotated[str, typer.Option("--transient-older-than")] = "7d",
+    only: Annotated[PruneScope, typer.Option("--only")] = PruneScope.all,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Prune installed history by count and collected transient history by age."""
+    try:
+        age = parse_duration(transient_older_than)
+    except AutomationctlError as exc:
+        raise _fail(str(exc)) from exc
     env = _env()
-    executions = transient.discover(paths.state_dir(env))
+    state = paths.state_dir(env)
+    if dry_run:
+        candidates = (
+            records.prune(state, keep_runs, dry_run=True) if only != PruneScope.transient else []
+        )
+        if only != PruneScope.scheduled:
+            candidates.extend(transient.prune_candidates(state, age))
+        for path in candidates:
+            size = sum(
+                item.lstat().st_size
+                for item in path.rglob("*")
+                if item.is_file() and not item.is_symlink()
+            )
+            typer.echo(f"would prune {path} ({size} bytes)")
+        typer.echo(f"would prune {len(candidates)} record(s); no reconciliation performed")
+        return
+    removed = records.prune(state, keep_runs) if only != PruneScope.transient else []
     count = 0
-    for backend_name in sorted({data["backend"] for data in executions}):
-        _, scheduler = _backend(backend_name, None, env)
-        count += transient.prune(paths.state_dir(env), keep_runs, scheduler)
+    if only != PruneScope.scheduled:
+        executions = transient.discover(state)
+        for backend_name in sorted({data["backend"] for data in executions}):
+            _, scheduler = _backend(backend_name, None, env)
+            count += transient.prune(state, age, scheduler)
     typer.echo(f"pruned {len(removed)} run(s), {count} transient execution(s)")
 
 

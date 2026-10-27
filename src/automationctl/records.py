@@ -290,17 +290,20 @@ def known_tasks(state_dir: Path) -> list[str]:
     return sorted(entry.name for entry in base.iterdir() if entry.is_dir())
 
 
-def prune(state_dir: Path, keep_runs: int, tasks: list[str] | None = None) -> list[Path]:
+def prune(
+    state_dir: Path, keep_runs: int, tasks: list[str] | None = None, *, dry_run: bool = False
+) -> list[Path]:
     """Delete all but the newest ``keep_runs`` run directories per task."""
     if keep_runs < 0:
         raise ValueError("keep_runs must not be negative")
-    if state_dir.exists():
+    if state_dir.exists() and not dry_run:
         ensure_private_dir(state_dir)
     removed: list[Path] = []
     for task in tasks if tasks is not None else known_tasks(state_dir):
         directories = run_dirs(state_dir, task)
         surplus = directories[: max(0, len(directories) - keep_runs)]
         for run_dir in surplus:
-            shutil.rmtree(run_dir, ignore_errors=True)
+            if not dry_run:
+                shutil.rmtree(run_dir, ignore_errors=True)
             removed.append(run_dir)
     return removed

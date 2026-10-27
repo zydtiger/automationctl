@@ -91,10 +91,15 @@ records remain separate. Explicit named locks are shared with installed tasks.
 `remove NAME` continues to operate only on installed tasks. `reconcile ID`
 checks a single scheduler registration, records an abandoned execution when it
 has disappeared, and retries cleanup of terminal executions. Neither command
-restarts a workload. Query commands are read-only. `prune --keep-runs N` retains
-the newest N collected terminal executions per display name, in addition to
-its existing installed-run retention. Active or unresolved executions are
-never pruned.
+restarts a workload. Query commands are read-only. `prune` retains the newest 50 runs per installed task (`--keep-runs N`) and
+seven days of transient history (`--transient-older-than DURATION`). Transient
+age uses `finished_at`, never creation time or per-name counts. Only terminal,
+collected executions with valid offset-aware completion times are removed, as
+entire execution directories. `0s` removes all eligible completed executions.
+`--only all|scheduled|transient` selects the history scope. `--dry-run` lists
+eligible paths and file sizes without writes, backend calls or reconciliation;
+actual pruning reconciles terminal registrations first. Active or unresolved
+executions are never pruned.
 
 ### systemd transient lifecycle
 

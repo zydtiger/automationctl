@@ -130,3 +130,15 @@ def test_tail_lines_can_bound_automatic_consumers(tmp_path: Path) -> None:
 def test_timestamps_round_trip() -> None:
     moment = datetime(2026, 8, 23, 3, 0, tzinfo=UTC)
     assert records.parse_isoformat(records.isoformat(moment)) == moment
+
+
+def test_prune_preview_preserves_files_and_permissions(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir(mode=0o755)
+    make_run(state, "audit", "20260821T030000Z-aaaaaa")
+    before_mode = state.stat().st_mode
+    before = {p: p.read_bytes() for p in state.rglob("*") if p.is_file()}
+    candidates = records.prune(state, keep_runs=0, dry_run=True)
+    assert len(candidates) == 1 and candidates[0].exists()
+    assert state.stat().st_mode == before_mode
+    assert before == {p: p.read_bytes() for p in state.rglob("*") if p.is_file()}

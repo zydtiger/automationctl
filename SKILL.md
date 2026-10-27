@@ -58,7 +58,12 @@ confirms collection, retries cleanup, or records a disappeared execution as
 abandoned. It never retries the workload. On uncertain scheduler acceptance,
 inspect the reported ID rather than submitting again. Workload result and
 cleanup state are separate. Logs remain after registration cleanup; `prune`
-retains terminal collected execution history per display name.
+keeps installed history by count (default 50 per task) and collected terminal
+transient history by completion age (default 7 days, independent of display name).
+Use `prune --only transient --transient-older-than 7d`, or `--only scheduled
+--keep-runs 20`. `--transient-older-than 0s` deletes all eligible transient
+history, including logs and snapshots. Preview with `--dry-run`; it performs no
+writes or reconciliation and lists only already-collected eligible executions.
 
 Transient registrations are boot/session scoped. On macOS each delayed job
 has a sleeping launchd-owned wrapper until its absolute deadline, and GUI logout
