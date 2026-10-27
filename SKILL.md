@@ -63,5 +63,7 @@ retains terminal collected execution history per display name.
 Transient registrations are boot/session scoped. On macOS each delayed job
 has a sleeping launchd-owned wrapper until its absolute deadline, and GUI logout
 ends the job. On Linux logout behavior follows the existing user manager;
-reboot does not restore pending jobs. Native macOS validation is pending;
-consult the repository's transient testing procedure before relying on it.
+reboot does not restore pending jobs. Native smoke tests passed on macOS 26.6.2,
+including wrapper SIGKILL and workload/descendant cleanup. Sleep/wake, logout,
+and reboot still require interactive validation; consult the repository's
+transient testing procedure for those checks.

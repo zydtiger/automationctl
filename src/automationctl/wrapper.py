@@ -563,9 +563,8 @@ def _execute_workload(
             deadline = time.monotonic() + task.timeout_seconds if task.timeout_seconds else None
             while True:
                 if options.cancel_event is not None and options.cancel_event.is_set():
-                    exit_code = (
-                        _terminate(process, options.kill_grace, result_fd) or -signal.SIGTERM
-                    )
+                    stopped_code = _terminate(process, options.kill_grace, result_fd)
+                    exit_code = stopped_code if stopped_code is not None else -signal.SIGTERM
                     status, reason = "cancelled", "execution cancelled"
                     break
                 remaining = None if deadline is None else deadline - time.monotonic()

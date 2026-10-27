@@ -535,3 +535,47 @@ def test_supervised_workload_dies_with_wrapper(tmp_path: Path, during_stop: bool
         for pid in pids:
             with suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("supervised", [False, True])
+@pytest.mark.parametrize("workload_exit_code", [0, 7])
+def test_cancellation_preserves_workload_exit_code(
+    tmp_path: Path, supervised: bool, workload_exit_code: int
+) -> None:
+    import sys
+    import time
+
+    from automationctl.wrapper import exec_task
+
+    ready = tmp_path / "ready"
+    command = (
+        "import pathlib,signal,sys,time; "
+        f"signal.signal(signal.SIGTERM, lambda *_: sys.exit({workload_exit_code})); "
+        f"pathlib.Path({str(ready)!r}).write_text('ready'); time.sleep(30)"
+    )
+    cancellation = threading.Event()
+    opts = options(tmp_path / "state")
+    opts.cancel_event = cancellation
+    opts.supervise_workload = supervised
+    opts.kill_grace = 2
+
+    def cancel_when_ready() -> None:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        cancellation.set()
+
+    canceller = threading.Thread(target=cancel_when_ready)
+    canceller.start()
+    try:
+        result = exec_task(task(tmp_path, command=(sys.executable, "-c", command)), opts)
+    finally:
+        canceller.join(timeout=6)
+    assert ready.exists(), "workload did not install its SIGTERM handler"
+    assert result.status == "cancelled"
+    assert result.exit_code == workload_exit_code
+    meta = records.read_meta(result.run_dir)
+    last = records.read_last(opts.state_dir, "demo")
+    assert meta is not None and last is not None
+    assert meta["status"] == last["status"] == "cancelled"
+    assert meta["exit_code"] == last["exit_code"] == workload_exit_code

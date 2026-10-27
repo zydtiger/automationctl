@@ -95,7 +95,9 @@ private launchd jobs; delayed executions each hold one sleeping wrapper until
 the wall-clock deadline. Deadlines catch up after sleep without waking the host.
 Registrations do not survive reboot or user-manager/GUI-domain teardown; Linux
 logout survival follows the user manager's existing linger configuration.
-macOS native validation is pending; see [the native test procedure](docs/TRANSIENT_TESTING.md).
+Native smoke tests passed on macOS 26.6.2, including wrapper SIGKILL and
+workload/descendant cleanup. Sleep/wake, logout, and reboot still require
+interactive validation; see [the native test procedure](docs/TRANSIENT_TESTING.md).
 
 ## Development
 
