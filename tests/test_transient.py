@@ -11,6 +11,7 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import psutil
 import pytest
 from typer.testing import CliRunner
 
@@ -365,9 +366,16 @@ def test_cancellation_before_start_does_not_launch(tmp_path: Path) -> None:
     assert result.status == "cancelled" and not marker.exists()
 
 
+def process_status(pid: int) -> str | None:
+    """Read process state without invoking a system executable."""
+    try:
+        return psutil.Process(pid).status()
+    except psutil.NoSuchProcess:
+        return None
+
+
 def test_timeout_kills_child_that_ignores_term(tmp_path: Path) -> None:
     import os
-    import subprocess
     import sys
 
     from automationctl.wrapper import exec_task
@@ -387,10 +395,7 @@ def test_timeout_kills_child_that_ignores_term(tmp_path: Path) -> None:
     pid = int(child_pid.read_text())
     try:
         # An unreaped zombie has already exited and cannot do more work.
-        observed = subprocess.run(
-            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False
-        ).stdout.strip()
-        assert not observed or observed.startswith("Z")
+        assert process_status(pid) in (None, psutil.STATUS_ZOMBIE)
     finally:
         with suppress(ProcessLookupError):
             os.kill(pid, signal.SIGKILL)
@@ -514,16 +519,8 @@ def test_supervised_workload_dies_with_wrapper(tmp_path: Path, during_stop: bool
         wrapper.wait(timeout=5)
         until = time.monotonic() + 5
         while time.monotonic() < until:
-            states = [
-                subprocess.run(
-                    ["ps", "-o", "stat=", "-p", str(pid)],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                ).stdout.strip()
-                for pid in pids
-            ]
-            if all(not state or state.startswith("Z") for state in states):
+            states = [process_status(pid) for pid in pids]
+            if all(state in (None, psutil.STATUS_ZOMBIE) for state in states):
                 break
             time.sleep(0.05)
         else:
