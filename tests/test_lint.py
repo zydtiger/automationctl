@@ -24,6 +24,15 @@ def test_deny_list_paths_and_task_notification_references(tmp_path: Path) -> Non
     assert any("undefined task notification" in message for message in messages)
 
 
+def test_on_success_requires_a_defined_notification(tmp_path: Path) -> None:
+    policy = MachinePolicy(tmp_path / "config.toml", LintPolicy(()))
+    task = TaskSpec(
+        "check", tmp_path / "check.toml", "check", ("tool",), on_success=("notify:missing",)
+    )
+    messages = [item.message for item in lint_task(task, policy, "systemd").errors]
+    assert any("on_success references undefined" in message for message in messages)
+
+
 def test_allow_full_access_is_a_warning_and_task_notify_resolves(tmp_path: Path) -> None:
     policy = MachinePolicy(tmp_path / "config.toml", LintPolicy(("danger",)))
     task = TaskSpec(

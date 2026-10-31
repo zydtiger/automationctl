@@ -34,6 +34,7 @@ TASK_KEYS = frozenset(
         "lock",
         "summary_cmd",
         "on_failure",
+        "on_success",
         "allow_full_access",
         "disabled",
         "notify",
@@ -171,6 +172,7 @@ class TaskSpec:
     lock: str | None = None
     summary_cmd: tuple[str, ...] | None = None
     on_failure: tuple[str, ...] = ()
+    on_success: tuple[str, ...] = ()
     allow_full_access: bool = False
     disabled: bool = False
     notify: Mapping[str, NotifyTransport] = field(default_factory=dict)
@@ -270,6 +272,7 @@ def parse_task(data: Mapping[str, Any], path: Path) -> TaskSpec:
         _str(data, "lock", path),
         summary_cmd,
         _strings(data, "on_failure", path) or (),
+        _strings(data, "on_success", path) or (),
         _bool(data, "allow_full_access", path) or False,
         _bool(data, "disabled", path) or False,
         _notify(data, path),

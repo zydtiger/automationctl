@@ -30,7 +30,8 @@ Task `command` is direct argv. `stdin` is an inline string; `stdin_file` is
 resolved relative to the source task file and copied into `stdin` at install
 time. `cwd`, `env_files`, and `path_prepend` must be absolute or home-relative.
 Task-local `[notify.<name>]` entries are referenced by `on_failure =
-["notify:<name>"]`; credentials belong in machine-local env files. A task
+["notify:<name>"]` and `on_success = ["notify:<name>"]`; credentials belong in
+machine-local env files. A task
 uses `$HOME` as its cwd when no `cwd` is supplied, and the wrapper records
 stdout, stderr, timeout, locks, final argv, and outcome under
 `$XDG_STATE_HOME/automationctl`.

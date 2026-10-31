@@ -140,6 +140,8 @@ def dump_task(task: TaskSpec) -> str:
         values.append(("summary_cmd", task.summary_cmd))
     if task.on_failure:
         values.append(("on_failure", task.on_failure))
+    if task.on_success:
+        values.append(("on_success", task.on_success))
     if task.allow_full_access:
         values.append(("allow_full_access", True))
     if task.disabled:

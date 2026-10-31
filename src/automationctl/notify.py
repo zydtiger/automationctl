@@ -1,4 +1,4 @@
-"""Failure notification transports declared by each task."""
+"""Run outcome notification transports declared by each task."""
 
 from __future__ import annotations
 
@@ -114,7 +114,7 @@ def dispatch(
     for reference in references:
         name = transport_name(reference)
         if name is None:
-            outcomes.append(NotifyOutcome(reference, False, "unsupported on_failure entry"))
+            outcomes.append(NotifyOutcome(reference, False, "unsupported notification entry"))
         elif name not in transports:
             outcomes.append(NotifyOutcome(name, False, "transport not defined in task"))
         else:

@@ -173,6 +173,38 @@ def test_failure_notifications_use_task_env_and_contain_transport_exceptions(
     )
 
 
+def test_success_notifications_fire_only_on_ok_and_omit_stderr(tmp_path: Path) -> None:
+    envfile = tmp_path / "secrets"
+    envfile.write_text("URL=https://ntfy.example/done\n", encoding="utf-8")
+    sent: list[bytes] = []
+
+    def sender(url: str, body: bytes, headers: object) -> None:
+        sent.append(body)
+
+    transport = {"n": NotifyTransport("n", "ntfy", url_env="URL")}
+    ok = task(
+        tmp_path,
+        command=("/bin/sh", "-c", "echo noise >&2"),
+        env_files=(str(envfile),),
+        notify=transport,
+        on_success=("notify:n",),
+    )
+    result = exec_task(ok, options(tmp_path, notify_sender=sender))
+    assert result.status == records.STATUS_OK and result.notifications[0].ok
+    assert b"status: ok" in sent[0] and b"stderr tail" not in sent[0]
+
+    sent.clear()
+    failed = task(
+        tmp_path,
+        command=("/bin/sh", "-c", "exit 7"),
+        env_files=(str(envfile),),
+        notify=transport,
+        on_success=("notify:n",),
+    )
+    result = exec_task(failed, options(tmp_path, notify_sender=sender))
+    assert result.exit_code == 7 and sent == [] and result.notifications == ()
+
+
 def test_missing_inputs_program_or_cwd_become_recorded_errors(tmp_path: Path) -> None:
     missing = exec_task(task(tmp_path, env_files=(str(tmp_path / "missing"),)), options(tmp_path))
     assert missing.status == records.STATUS_ERROR

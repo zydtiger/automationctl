@@ -11,7 +11,7 @@ boundary.
 An installed task is `schema_version = 2` and has an explicit safe `name`,
 description, and non-empty argv `command`. It owns its schedule, timeout,
 jitter, persistence, paths, environment files, locks, summary command,
-disable state, failure notifications, and sandbox opt-in. `stdin` and
+disable state, outcome notifications, and sandbox opt-in. `stdin` and
 `stdin_file` are mutually exclusive; installation reads a source-relative
 `stdin_file` and writes inline `stdin` into the installed definition. Unknown
 fields and every schema other than v2 are rejected.
@@ -56,7 +56,8 @@ another label's retry state.
 The wrapper creates private run records, takes an implicit per-task lock and
 optional named lock, builds a minimal environment, resolves argv placeholders,
 streams stdout/stderr, enforces timeout, runs summary extraction, records
-program version, and sends task-local failure notifications. Default cwd is
+program version, and sends task-local failure and success notifications; skipped
+runs notify neither. Default cwd is
 HOME. `{date}`, `{hostname}`, `{task}`, and `{run_dir}` expand strictly in argv
 and leniently in stdin so JSON and code braces remain intact.
 

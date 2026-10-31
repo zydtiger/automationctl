@@ -89,19 +89,23 @@ def lint_task(task: TaskSpec, policy: MachinePolicy, backend: str) -> LintReport
             lock_path(Path("/"), task.lock)
         except AutomationctlError as exc:
             out.append(Diagnostic(ERROR, str(exc), task.name, task.path))
-    for reference in task.on_failure:
-        if (
-            not reference.startswith("notify:")
-            or reference.removeprefix("notify:") not in task.notify
-        ):
-            out.append(
-                Diagnostic(
-                    ERROR,
-                    f"on_failure references undefined task notification: {reference}",
-                    task.name,
-                    task.path,
+    for field_name, references in (
+        ("on_failure", task.on_failure),
+        ("on_success", task.on_success),
+    ):
+        for reference in references:
+            if (
+                not reference.startswith("notify:")
+                or reference.removeprefix("notify:") not in task.notify
+            ):
+                out.append(
+                    Diagnostic(
+                        ERROR,
+                        f"{field_name} references undefined task notification: {reference}",
+                        task.name,
+                        task.path,
+                    )
                 )
-            )
     try:
         invocation = build_invocation(
             task, builtin_values(task.name, "hostname", "<run-dir>", datetime.now())

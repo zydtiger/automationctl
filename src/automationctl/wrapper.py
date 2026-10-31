@@ -244,6 +244,7 @@ def _effective(task: TaskSpec) -> dict[str, Any]:
     return {
         "timeout_seconds": task.timeout_seconds,
         "on_failure": list(task.on_failure),
+        "on_success": list(task.on_success),
         "jitter_seconds": task.jitter_seconds,
         "persistent": effective_persistent(task),
     }
@@ -296,7 +297,14 @@ def _finalize(
         },
     )
     outcomes: tuple[NotifyOutcome, ...] = ()
-    if status in records.FAILURE_STATUSES and task.on_failure:
+    references = (
+        task.on_failure
+        if status in records.FAILURE_STATUSES
+        else task.on_success
+        if status == records.STATUS_OK
+        else ()
+    )
+    if references:
         body_parts = [
             f"task: {task.name}",
             f"host: {options.hostname}",
@@ -309,7 +317,7 @@ def _finalize(
             body_parts.append(f"reason: {reason}")
         if summary := _read_result(run_dir):
             body_parts.append(f"summary: {summary}")
-        if tail := _tail(run_dir / records.STDERR_FILE):
+        if status != records.STATUS_OK and (tail := _tail(run_dir / records.STDERR_FILE)):
             body_parts.append("stderr tail:\n" + tail)
         event = NotifyEvent(
             task.name,
@@ -320,7 +328,7 @@ def _finalize(
             str(run_dir),
         )
         delivered: list[NotifyOutcome] = []
-        for reference in task.on_failure:
+        for reference in references:
             try:
                 delivered.extend(
                     dispatch(
