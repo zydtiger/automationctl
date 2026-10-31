@@ -57,6 +57,21 @@ def test_parse_env_file_handles_comments_exports_and_quotes(tmp_path: Path) -> N
         parse_env_file(path)
 
 
+def test_build_env_keeps_automationctl_xdg_homes_out_of_tasks(tmp_path: Path) -> None:
+    ambient = {
+        "HOME": str(tmp_path),
+        "XDG_CONFIG_HOME": "/config",
+        "XDG_STATE_HOME": "/state",
+        "XDG_CACHE_HOME": "/cache",
+    }
+    env = build_env(task(tmp_path), ambient, tmp_path)
+    assert "XDG_CONFIG_HOME" not in env and "XDG_STATE_HOME" not in env
+    assert env["XDG_CACHE_HOME"] == "/cache"
+
+    explicit = task(tmp_path, env={"XDG_CONFIG_HOME": "/task"})
+    assert build_env(explicit, ambient, tmp_path)["XDG_CONFIG_HOME"] == "/task"
+
+
 def test_build_env_layers_files_task_values_and_path(tmp_path: Path) -> None:
     envfile = tmp_path / "env"
     envfile.write_text("TOKEN=secret\nSHARED=file\n", encoding="utf-8")

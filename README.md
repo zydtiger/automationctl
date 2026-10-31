@@ -44,8 +44,9 @@ rendered. The policy does not provide task
 defaults, runners, host selection, notifications, or environment values.
 Generated scheduler artifacts receive the resolved `XDG_CONFIG_HOME` and
 `XDG_STATE_HOME`, so interactive and scheduled invocations load the same
-installed task set. Run records remain under `$XDG_STATE_HOME/automationctl`
-or `~/.local/state/automationctl`.
+installed task set. These two values configure automationctl only; task commands
+do not inherit them unless the task sets them in `env`. Run records remain under
+`$XDG_STATE_HOME/automationctl` or `~/.local/state/automationctl`.
 
 ## Transient execution
 

@@ -40,9 +40,7 @@ BASE_ENV_KEYS = (
     "TMPDIR",
     "SSH_AUTH_SOCK",
     "XDG_RUNTIME_DIR",
-    "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
-    "XDG_STATE_HOME",
     "XDG_CACHE_HOME",
 )
 DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"

@@ -54,7 +54,9 @@ per label and merges activation metadata so operating one task cannot discard
 another label's retry state.
 
 The wrapper creates private run records, takes an implicit per-task lock and
-optional named lock, builds a minimal environment, resolves argv placeholders,
+optional named lock, builds a minimal environment that omits automationctl's own
+`XDG_CONFIG_HOME` and `XDG_STATE_HOME` unless the task sets them, resolves argv
+placeholders,
 streams stdout/stderr, enforces timeout, runs summary extraction, records
 program version, and sends task-local failure and success notifications; skipped
 runs notify neither. Default cwd is
