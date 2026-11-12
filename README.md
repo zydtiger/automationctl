@@ -48,6 +48,34 @@ installed task set. These two values configure automationctl only; task commands
 do not inherit them unless the task sets them in `env`. Run records remain under
 `$XDG_STATE_HOME/automationctl` or `~/.local/state/automationctl`.
 
+## Home Manager
+
+The flake's `homeManagerModules.default` installs automationctl and keeps the
+declared tasks installed. Each activation installs or replaces them, and removes
+the ones that are no longer declared; tasks installed any other way are left alone.
+
+```nix
+{
+  imports = [ inputs.automationctl.homeManagerModules.default ];
+  programs.automationctl = {
+    enable = true;
+    # Optional machine policy, installed as config.toml.
+    configFile = ./config.toml;
+    tasks.hourly-check = {
+      schema_version = 2;
+      description = "Record a simple health check";
+      command = [ "/usr/bin/true" ];
+      schedule = "every 1h";
+      timeout = "2m";
+    };
+  };
+}
+```
+
+The attribute name becomes the task's `name`, and the Home Manager profile's
+`bin` directory is added to `path_prepend`. Tasks are linted during the build,
+so an invalid one fails before activation changes the scheduler.
+
 ## Transient execution
 
 Submit a one-time command without installing a reusable task:

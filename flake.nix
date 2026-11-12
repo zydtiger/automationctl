@@ -22,6 +22,7 @@
 
   outputs =
     {
+      self,
       nixpkgs,
       pyproject-nix,
       uv2nix,
@@ -81,6 +82,8 @@
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
               cp -r --no-preserve=mode ${./tests} tests
+              # tests/test_home_manager_sync.py loads the module's sync script.
+              cp -r --no-preserve=mode ${./nix} nix
               ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                 # The Linux sandbox has no system coreutils or zoneinfo database.
                 export TZDIR=${pkgs.tzdata}/share/zoneinfo
@@ -121,5 +124,16 @@
           default = automationctl;
         }
       );
+
+      # Installs automationctl and keeps declared tasks installed: import it and
+      # set `programs.automationctl`.
+      homeManagerModules.default =
+        { pkgs, ... }:
+        {
+          imports = [ ./nix/home-manager.nix ];
+          programs.automationctl.package =
+            lib.mkDefault
+              self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        };
     };
 }

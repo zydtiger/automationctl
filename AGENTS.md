@@ -19,6 +19,9 @@
 - `tests/` — pytest suite; backend rendering and lifecycle are verified without a live scheduler.
 - `docs/DESIGN.md` — design contract.
 - `examples/` — generic sample automations layout (arrives with M0).
+- `flake.nix` — Nix package and the `homeManagerModules.default` output.
+- `nix/` — the Home Manager module and `sync_tasks.py`, the standard-library
+  script its activation runs to reconcile declared tasks.
 
 ## Setup and Commands
 
